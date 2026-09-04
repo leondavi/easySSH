@@ -233,3 +233,20 @@ pub struct CommandResult {
     pub stdout: String,
     pub stderr: String,
 }
+
+/// Result of the background health checks for one connection.
+///
+/// Every field is optional because "we have not looked yet" is a distinct state
+/// from "we looked and the answer is no" — the UI shows them differently.
+#[derive(Debug, Clone, Default, Serialize)]
+pub struct ProbeStatus {
+    pub profile_id: String,
+    /// Whether the SSH port accepted a TCP connection.
+    pub reachable: Option<bool>,
+    pub reachable_at: Option<u64>,
+    /// Whether the configured key logs in without a password.
+    pub key_auth: Option<bool>,
+    pub key_auth_at: Option<u64>,
+    /// Why `key_auth` is false, or why it could not be determined.
+    pub key_auth_note: Option<String>,
+}

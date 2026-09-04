@@ -42,6 +42,8 @@ const state = {
   profiles: [],
   keys: [],
   statuses: new Map(),   // profileId -> SessionStatus
+  probes: new Map(),     // profileId -> ProbeStatus
+  authOpen: false,       // Authentication card expanded by the user
   descriptions: new Map(),
   selectedId: null,
   filter: "",
@@ -53,6 +55,62 @@ const state = {
 
 const selected = () => state.profiles.find((p) => p.id === state.selectedId) || null;
 const statusOf = (id) => state.statuses.get(id) || { connected: false, tunnels: [] };
+const probeOf = (id) => state.probes.get(id) || {};
+
+/* ── indicator model ──────────────────────────────────────────────────────
+   Four lamps per connection. Each resolves to a colour class plus the words
+   shown beside it in the detail pane and in the sidebar tooltip. */
+
+function leds(p) {
+  const st = statusOf(p.id);
+  const pr = probeOf(p.id);
+
+  // 1. Session — green only while a connection is actually open.
+  const connected = st.connected
+    ? { cls: "green", label: "Connected", note: "" }
+    : { cls: "unknown", label: "Not connected", note: "" };
+
+  // 2. Reachability — blue when the SSH port answers, red when it does not.
+  const reachable =
+    pr.reachable === true  ? { cls: "blue",    label: "Reachable", note: "" }
+  : pr.reachable === false ? { cls: "red",     label: "Unreachable", note: `port ${p.port} did not answer` }
+  :                          { cls: "unknown", label: "Reachability unknown", note: "not checked yet" };
+
+  // 3. Key login. An open session already proves it, so trust that over a
+  //    stale probe result.
+  const provenBySession = st.connected && p.auth === "key";
+  const keyAuth =
+    p.auth !== "key"        ? { cls: "unknown", label: "Password login", note: "no key configured" }
+  : provenBySession         ? { cls: "green",   label: "Key login works", note: "in use now" }
+  : pr.key_auth === true    ? { cls: "green",   label: "Key login works", note: "" }
+  : pr.key_auth === false   ? { cls: "red",     label: "Key login refused", note: pr.key_auth_note || "" }
+  :                           { cls: "unknown", label: "Key login unknown", note: pr.key_auth_note || "not checked yet" };
+
+  // 4. Tunnels — green if any are up, blinking red if one reported an error,
+  //    red if they are all down. Absent when the connection defines none.
+  let tunnel = null;
+  if (p.tunnels.length) {
+    const rows = st.tunnels || [];
+    const failed = rows.find((t) => t.error);
+    const running = rows.filter((t) => t.running).length;
+    tunnel = failed
+      ? { cls: "red blink", label: "Tunnel error", note: failed.error }
+      : running
+        ? { cls: "green", label: `${running} of ${p.tunnels.length} tunnel${p.tunnels.length === 1 ? "" : "s"} active`, note: "" }
+        : { cls: "red", label: "Tunnels inactive", note: st.connected ? "" : "connect to start them" };
+  }
+
+  return { connected, reachable, keyAuth, tunnel };
+}
+
+/** Something the user should look at on the Authentication card. */
+function authHasIssue(p) {
+  const pr = probeOf(p.id);
+  if (p.auth === "key" && !p.key_path) return true;
+  if (p.auth === "key" && pr.key_auth === false) return true;
+  if (p.auth === "key" && !p.key_installed && pr.key_auth !== true) return true;
+  return false;
+}
 
 /* ── toasts ───────────────────────────────────────────────────────────── */
 
@@ -164,7 +222,15 @@ function renderSidebar() {
       h("div", { class: "profile-text" },
         h("span", { class: "profile-name", text: p.name }),
         h("span", { class: "profile-sub", text: `${p.username}@${p.host}` })),
-      p.from_config ? h("span", { class: "row-tag", title: "From your ssh config", text: "cfg" }) : null);
+      p.from_config ? h("span", { class: "row-tag", title: "From your ssh config", text: "cfg" }) : null,
+      (() => {
+        const l = leds(p);
+        const shown = [l.connected, l.reachable, l.keyAuth, l.tunnel].filter(Boolean);
+        return h("span", {
+          class: "row-leds",
+          title: shown.map((x) => x.label + (x.note ? ` (${x.note})` : "")).join("\n"),
+        }, ...shown.map((x) => h("span", { class: `led ${x.cls}` })));
+      })());
     return h("li", {}, row);
   }));
 
@@ -214,6 +280,15 @@ function renderDetail() {
     ? (state.descriptions.get(p.id) || `${p.username}@${p.host}`)
     : "";
 
+  const lamp = leds(p);
+  $("led-strip").replaceChildren(
+    ...[lamp.connected, lamp.reachable, lamp.keyAuth, lamp.tunnel]
+      .filter(Boolean)
+      .map((l) => h("div", { class: "led-item", title: l.note || l.label },
+        h("span", { class: `led ${l.cls}` }),
+        h("span", { class: "led-label", text: l.label }),
+        l.note ? h("span", { class: "led-note", text: `· ${l.note}` }) : null)));
+
   const fpRow = $("fingerprint-row");
   fpRow.hidden = !st.server_fingerprint;
   if (st.server_fingerprint) {
@@ -232,6 +307,18 @@ function renderDetail() {
   badge.textContent = p.auth === "key" ? "Key" : "Password";
   badge.classList.toggle("ok", p.auth === "key" && p.key_installed);
   if (p.auth === "key" && p.key_installed) badge.textContent = "Key installed";
+
+  // Collapsed by default — the details only matter when you are changing them.
+  // An unresolved problem forces it open so the user can see what is wrong
+  // without having to know to look here.
+  const issue = authHasIssue(p);
+  const open = state.authOpen || issue;
+  $("auth-toggle").setAttribute("aria-expanded", String(open));
+  $("auth-summary").textContent = open
+    ? ""
+    : p.auth === "key"
+      ? [basename(p.key_path || ""), lamp.keyAuth.label].filter(Boolean).join("  ·  ")
+      : "Password";
 
   // For an entry that came from the ssh config, say whether it is set up to log
   // in without a password, and on what basis.
@@ -367,6 +454,7 @@ const escapeHtml = (s) => s.replace(/[&<>"]/g, (c) =>
 
 function select(id) {
   if (id !== state.selectedId) {
+    state.authOpen = false;
     $("run-output").hidden = true;
     $("run-output").textContent = "";
     $("run-input").value = "";
@@ -469,6 +557,14 @@ async function switchLocation(dir) {
       ? `${state.location.dir} — ${shown} connection${shown === 1 ? "" : "s"} from this config`
       : `${state.location.dir} — no connections defined in this config`);
   } catch (e) { fail(e); }
+}
+
+async function reloadProbes() {
+  try {
+    for (const pr of await invoke("probe_statuses")) state.probes.set(pr.profile_id, pr);
+    renderSidebar();
+    renderDetail();
+  } catch { /* probes are advisory; never let them break the UI */ }
 }
 
 async function reloadStatuses() {
@@ -1177,6 +1273,13 @@ $("run-input").addEventListener("keydown", (e) => { if (e.key === "Enter") runQu
 $("delete-btn").addEventListener("click", () => selected() && confirmDelete(selected()));
 $("setup-btn").addEventListener("click", () => selected() && setupSheet(selected()));
 $("add-tunnel").addEventListener("click", () => selected() && tunnelSheet(selected(), null));
+$("auth-toggle").addEventListener("click", () => {
+  // A forced-open card can still be collapsed; the next render re-opens it
+  // while the problem remains, which is the behaviour we want.
+  state.authOpen = $("auth-toggle").getAttribute("aria-expanded") !== "true";
+  renderDetail();
+});
+
 $("browse-key").addEventListener("click", browseForKey);
 $("show-key").addEventListener("click", () => {
   const p = selected();
@@ -1230,6 +1333,12 @@ listen("session-status", (e) => {
   renderDetail();
 });
 
+listen("probe-status", (e) => {
+  for (const pr of e.payload) state.probes.set(pr.profile_id, pr);
+  renderSidebar();
+  renderDetail();
+});
+
 listen("tunnel-error", (e) => fail(e.payload.error));
 listen("profiles-changed", () => reloadProfiles());
 listen("ssh-location-changed", async () => { await reloadConfigHosts(); renderDetail(); });
@@ -1265,6 +1374,7 @@ setInterval(() => {
   await reloadProfiles();
   await reloadConfigHosts();
   await reloadStatuses();
+  await reloadProbes();
   if (!state.selectedId && state.profiles.length) select(state.profiles[0].id);
   renderDetail();
 })().catch(fail);

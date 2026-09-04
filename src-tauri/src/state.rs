@@ -5,7 +5,7 @@ use std::sync::Arc;
 
 use tokio::sync::Mutex;
 
-use crate::model::{Profile, SessionStatus, Settings, Tunnel, TunnelStatus};
+use crate::model::{ProbeStatus, Profile, SessionStatus, Settings, Tunnel, TunnelStatus};
 use crate::ssh::Session;
 use crate::tunnels::RunningTunnel;
 
@@ -50,11 +50,23 @@ impl LiveSession {
     }
 }
 
+/// What the background checks know about one connection, plus the bookkeeping
+/// that keeps a failing key from being retried too eagerly.
+#[derive(Default)]
+pub struct ProbeRecord {
+    pub status: ProbeStatus,
+    /// Consecutive key-login failures, used to grow the retry interval.
+    pub failures: u32,
+    /// When the key may next be tested. `None` means "as soon as possible".
+    pub next_key_check: Option<std::time::Instant>,
+}
+
 #[derive(Default)]
 pub struct Inner {
     pub profiles: Vec<Profile>,
     pub sessions: HashMap<String, LiveSession>,
     pub settings: Settings,
+    pub probes: HashMap<String, ProbeRecord>,
 }
 
 impl Inner {
@@ -205,6 +217,7 @@ impl AppState {
             profiles,
             sessions: HashMap::new(),
             settings,
+            probes: HashMap::new(),
         };
         // Populate the config-derived connections before the window opens, so
         // the sidebar is already complete on first paint.
@@ -235,6 +248,7 @@ mod tests {
             settings: Settings {
                 ssh_dir: Some(dir.display().to_string()),
             },
+            probes: HashMap::new(),
         }
     }
 

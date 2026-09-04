@@ -12,6 +12,10 @@ on:
   pull_request:
   workflow_dispatch:
 
+concurrency:
+  group: ci-${{ github.ref }}
+  cancel-in-progress: true
+
 env:
   CARGO_TERM_COLOR: always
   RUST_BACKTRACE: 1
@@ -112,7 +116,17 @@ jobs:
         with:
           workspaces: src-tauri
 
+      - name: Cache the Tauri CLI
+        id: tauri-cli
+        uses: actions/cache@v4
+        with:
+          path: |
+            ~/.cargo/bin/cargo-tauri
+            ~/.cargo/bin/cargo-tauri.exe
+          key: tauri-cli-v2-${{ runner.os }}
+
       - name: Install the Tauri CLI
+        if: steps.tauri-cli.outputs.cache-hit != 'true'
         run: cargo install tauri-cli --version "^2" --locked
 
       # This is the job that actually answers "does the Windows installer
@@ -152,7 +166,17 @@ jobs:
         with:
           workspaces: src-tauri
 
+      - name: Cache the Tauri CLI
+        id: tauri-cli
+        uses: actions/cache@v4
+        with:
+          path: |
+            ~/.cargo/bin/cargo-tauri
+            ~/.cargo/bin/cargo-tauri.exe
+          key: tauri-cli-v2-${{ runner.os }}
+
       - name: Install the Tauri CLI
+        if: steps.tauri-cli.outputs.cache-hit != 'true'
         run: cargo install tauri-cli --version "^2" --locked
 
       - name: Build the .app and .dmg

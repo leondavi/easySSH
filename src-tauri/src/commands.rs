@@ -9,8 +9,8 @@ use tauri::{AppHandle, Emitter, State};
 use tokio::sync::Mutex;
 
 use crate::model::{
-    AuthMethod, CommandResult, KeyInfo, KnownHost, KnownHostRef, Profile, SessionStatus,
-    SetupResult, SshHostEntry, SshLocation, Tunnel,
+    AuthMethod, CommandResult, KeyInfo, KnownHost, KnownHostRef, ProbeStatus, Profile,
+    SessionStatus, SetupResult, SshHostEntry, SshLocation, Tunnel,
 };
 use crate::state::{AppState, LiveSession};
 use crate::{keys, knownhosts, ssh, sshconfig, store, terminal, tunnels};
@@ -359,6 +359,9 @@ pub async fn setup_key_auth(
         Path::new(&key.path),
         None,
         &known_hosts,
+        // The install just ran over a live session to this host, so its key is
+        // already recorded; learning is the right policy for a user-driven step.
+        ssh::HostKeyPolicy::LearnUnknown,
     )
     .await;
 
@@ -685,4 +688,12 @@ pub async fn remove_known_hosts(
 ) -> Result<usize, String> {
     let dir = state.inner.lock().await.ssh_dir();
     knownhosts::remove(&dir, &entries).map_err(anyhow_err)
+}
+
+/// The latest background health-check results, one per connection that has
+/// been checked.
+#[tauri::command]
+pub async fn probe_statuses(state: State<'_, AppState>) -> Result<Vec<ProbeStatus>, String> {
+    let inner = state.inner.lock().await;
+    Ok(inner.probes.values().map(|r| r.status.clone()).collect())
 }

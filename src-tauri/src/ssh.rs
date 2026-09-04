@@ -16,6 +16,18 @@ use crate::model::{AuthMethod, Profile};
 const OK_MARKER: &str = "__EASYSSH_OK__";
 const PRESENT_MARKER: &str = "__EASYSSH_ALREADY_PRESENT__";
 
+/// What to do about a host that is not in `known_hosts` yet.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum HostKeyPolicy {
+    /// Accept it and record it — trust on first use, for a connection the user
+    /// asked for and is watching.
+    LearnUnknown,
+    /// Refuse it. Used by background probes: silently pinning a host key
+    /// without the user ever seeing the fingerprint would defeat the point of
+    /// showing it to them.
+    RequireKnown,
+}
+
 /// Host key policy. easySSH uses trust-on-first-use against `~/.ssh/known_hosts`:
 /// an unknown host is accepted and recorded, but a host whose key *changed*
 /// is refused, because that is what a man-in-the-middle looks like.
@@ -26,6 +38,7 @@ pub struct Client {
     /// russh's convenience helpers assume `~/.ssh/known_hosts`, which would
     /// disagree with the rest of the app once another location is chosen.
     known_hosts: std::path::PathBuf,
+    policy: HostKeyPolicy,
     /// Filled in during the handshake so the UI can show the fingerprint.
     fingerprint: Arc<Mutex<Option<String>>>,
     /// Set when we accepted a host we had never seen before.
@@ -60,8 +73,10 @@ impl client::Handler for Client {
         ) {
             // Known and matching.
             Ok(true) => Ok(true),
-            // Not in known_hosts at all: trust on first use and remember it.
+            // Not in known_hosts at all.
+            Ok(false) if self.policy == HostKeyPolicy::RequireKnown => Ok(false),
             Ok(false) => {
+                // Trust on first use and remember it.
                 self.first_contact.store(true, Ordering::Relaxed);
                 if let Err(e) = russh::keys::known_hosts::learn_known_hosts_path(
                     &self.host,
@@ -130,6 +145,7 @@ async fn open(
     host: &str,
     port: u16,
     known_hosts: &Path,
+    policy: HostKeyPolicy,
 ) -> Result<(Handle<Client>, Arc<Mutex<Option<String>>>, Arc<AtomicBool>)> {
     let fingerprint = Arc::new(Mutex::new(None));
     let first_contact = Arc::new(AtomicBool::new(false));
@@ -137,6 +153,7 @@ async fn open(
         host: host.to_string(),
         port,
         known_hosts: known_hosts.to_path_buf(),
+        policy,
         fingerprint: fingerprint.clone(),
         first_contact: first_contact.clone(),
     };
@@ -177,7 +194,8 @@ pub async fn connect_password(
     password: &str,
     known_hosts: &Path,
 ) -> Result<Session> {
-    let (mut handle, fingerprint, first_contact) = open(host, port, known_hosts).await?;
+    let (mut handle, fingerprint, first_contact) =
+        open(host, port, known_hosts, HostKeyPolicy::LearnUnknown).await?;
 
     let result = handle
         .authenticate_password(username, password)
@@ -219,6 +237,7 @@ pub async fn connect_key(
     key_path: &Path,
     passphrase: Option<&str>,
     known_hosts: &Path,
+    policy: HostKeyPolicy,
 ) -> Result<Session> {
     let key = load_secret_key(key_path, passphrase).map_err(|e| {
         anyhow!(
@@ -227,7 +246,7 @@ pub async fn connect_key(
         )
     })?;
 
-    let (mut handle, fingerprint, first_contact) = open(host, port, known_hosts).await?;
+    let (mut handle, fingerprint, first_contact) = open(host, port, known_hosts, policy).await?;
 
     // RSA keys must be signed with a hash the server actually accepts; older
     // servers want SHA-1 while modern ones require SHA-2.
@@ -280,6 +299,7 @@ pub async fn connect_profile(
                 Path::new(path),
                 secret.filter(|s| !s.is_empty()),
                 known_hosts,
+                HostKeyPolicy::LearnUnknown,
             )
             .await
         }

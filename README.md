@@ -67,6 +67,34 @@ you try to connect.
 
 ---
 
+## Status at a glance
+
+Every connection carries four lamps, in the sidebar and on its detail page.
+easySSH keeps them current in the background, so you can see the state of your
+fleet without clicking into anything.
+
+| Lamp | Green | Blue | Red | Grey |
+| --- | --- | --- | --- | --- |
+| **Session** | connected now | — | — | not connected |
+| **Reachable** | — | the SSH port answers | nothing answered | not checked yet |
+| **Key login** | logs in without a password | — | the key was refused | unknown |
+| **Tunnels** | at least one is up | — | all down, or **blinking** on an error | no tunnels defined |
+
+Reachability is a TCP connect to the SSH port, not an ICMP ping: it needs no
+special privileges, behaves the same on macOS and Windows, and tests the port
+that actually matters. It runs every 45 seconds.
+
+Key login is a real handshake, so it is far more expensive — it runs at most
+every five minutes, only when no session is already open (a live connection
+proves the answer anyway), and it **backs off** after failures, up to an hour.
+That last part matters: a key that is genuinely rejected would otherwise
+generate a failed authentication every five minutes forever, which is exactly
+the pattern fail2ban exists to ban. Background probes also refuse to trust a
+host that is not already in `known_hosts`, so easySSH never pins a host key
+without showing you the fingerprint first.
+
+---
+
 ## Web tunnels, and why the remote address matters
 
 A tunnel forwards a port on your machine to an address **the server can reach**:

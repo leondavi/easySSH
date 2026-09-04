@@ -88,17 +88,25 @@
           </div>
           <button id="edit-btn" class="btn btn-plain btn-small">Edit</button>
         </div>
+        <div class="led-strip" id="led-strip"></div>
+
         <div id="fingerprint-row" class="fingerprint" hidden>
           <span class="mono" id="fingerprint"></span>
         </div>
       </div>
 
       <div class="card">
-        <div class="card-head">
+        <button class="card-head disclosure" id="auth-toggle"
+                aria-expanded="false" aria-controls="auth-body">
+          <span class="disclosure-chevron" aria-hidden="true">
+            <svg viewBox="0 0 16 16"><path d="M6 3.5 10.5 8 6 12.5"/></svg>
+          </span>
           <h3>Authentication</h3>
+          <span id="auth-summary" class="auth-summary"></span>
           <span id="auth-badge" class="badge"></span>
-        </div>
+        </button>
 
+        <div id="auth-body" class="disclosure-body">
         <div class="field-row">
           <label>Method</label>
           <div class="segmented" id="auth-seg" role="tablist">
@@ -126,6 +134,7 @@
             <p>Sign in with your password once. easySSH appends the selected public key to <span class="mono">~/.ssh/authorized_keys</span> on the server and verifies it works.</p>
           </div>
           <button id="setup-btn" class="btn btn-primary btn-small">Set Up…</button>
+        </div>
         </div>
       </div>
 
