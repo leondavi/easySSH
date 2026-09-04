@@ -123,3 +123,113 @@ async fn forward(
     tokio::io::copy_bidirectional(&mut socket, &mut stream).await?;
     Ok(())
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::testserver as harness;
+    use tokio::io::{AsyncReadExt, AsyncWriteExt};
+
+    fn spec(local_port: u16, remote_host: &str, remote_port: u16) -> Tunnel {
+        Tunnel {
+            id: "t1".into(),
+            name: "Test".into(),
+            local_port,
+            remote_host: remote_host.into(),
+            remote_port,
+            auto_start: false,
+            scheme: "http".into(),
+        }
+    }
+
+    /// Ask the OS for a free port by binding and immediately releasing it.
+    async fn free_port() -> u16 {
+        let l = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let p = l.local_addr().unwrap().port();
+        drop(l);
+        p
+    }
+
+    async fn connect_test_server(tag: &str) -> Arc<russh::client::Handle<crate::ssh::Client>> {
+        let port = harness::start().await;
+        let kh = harness::known_hosts(tag);
+        let session =
+            crate::ssh::connect_password("127.0.0.1", port, "someone", harness::PASSWORD, &kh)
+                .await
+                .expect("connect");
+        session.handle
+    }
+
+    #[tokio::test]
+    async fn forwards_bytes_to_the_requested_remote_address() {
+        let handle = connect_test_server("tunnel-fwd").await;
+        let local = free_port().await;
+
+        let running = start(handle, spec(local, "10.0.0.9", 8443), |_| {})
+            .await
+            .expect("tunnel should bind");
+
+        let mut client = tokio::net::TcpStream::connect(("127.0.0.1", local))
+            .await
+            .expect("connect through the tunnel");
+
+        // The server announces the address it was asked to reach, which proves
+        // the remote side of the forward is resolved remotely and not here.
+        let mut buf = vec![0u8; 64];
+        let n = client.read(&mut buf).await.unwrap();
+        assert_eq!(
+            String::from_utf8_lossy(&buf[..n]).trim(),
+            "target=10.0.0.9:8443"
+        );
+
+        // And the channel carries data both ways.
+        client.write_all(b"ping").await.unwrap();
+        let n = client.read(&mut buf).await.unwrap();
+        assert_eq!(&buf[..n], b"ping");
+
+        assert_eq!(running.connections.load(Ordering::Relaxed), 1);
+        assert!(running.is_alive());
+        running.stop();
+    }
+
+    #[tokio::test]
+    async fn a_taken_local_port_is_reported_not_silently_ignored() {
+        let handle = connect_test_server("tunnel-busy").await;
+
+        // Hold the port so the tunnel cannot have it.
+        let squatter = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let taken = squatter.local_addr().unwrap().port();
+
+        let err = match start(handle, spec(taken, "localhost", 80), |_| {}).await {
+            Ok(_) => panic!("binding a port already in use must fail"),
+            Err(e) => e.to_string(),
+        };
+        assert!(
+            err.contains("already in use") && err.contains(&taken.to_string()),
+            "unhelpful error: {err}"
+        );
+    }
+
+    #[tokio::test]
+    async fn stopping_a_tunnel_frees_its_local_port() {
+        let handle = connect_test_server("tunnel-stop").await;
+        let local = free_port().await;
+
+        let running = start(handle.clone(), spec(local, "localhost", 80), |_| {})
+            .await
+            .expect("bind");
+        running.stop();
+
+        // The abort is asynchronous, so give the listener a moment to drop.
+        for _ in 0..50 {
+            if tokio::net::TcpListener::bind(("127.0.0.1", local))
+                .await
+                .is_ok()
+            {
+                return;
+            }
+            tokio::time::sleep(std::time::Duration::from_millis(20)).await;
+        }
+        panic!("the local port was still bound after the tunnel stopped");
+    }
+}

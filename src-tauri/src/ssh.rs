@@ -469,113 +469,7 @@ pub async fn disconnect(handle: &Handle<Client>) {
 #[cfg(test)]
 mod tests {
     use super::*;
-
-    /// A minimal SSH server so the client path can be exercised for real.
-    /// Without it, `exec` collecting a command's output is untestable.
-    mod harness {
-        use std::sync::Arc;
-
-        use russh::server::{Auth, Handler, Msg, Session};
-        use russh::{Channel, ChannelId};
-        use tokio::net::TcpListener;
-
-        pub const PASSWORD: &str = "correct-horse";
-
-        #[derive(Default)]
-        pub struct Server {
-            /// Keep the server-side channel alive; dropping it would close the
-            /// channel before the command's output could be written.
-            channels: Vec<Channel<Msg>>,
-        }
-
-        impl Handler for Server {
-            type Error = russh::Error;
-
-            async fn auth_password(
-                &mut self,
-                _user: &str,
-                password: &str,
-            ) -> Result<Auth, Self::Error> {
-                if password == PASSWORD {
-                    Ok(Auth::Accept)
-                } else {
-                    Ok(Auth::Reject {
-                        proceed_with_methods: None,
-                        partial_success: false,
-                    })
-                }
-            }
-
-            async fn channel_open_session(
-                &mut self,
-                channel: Channel<Msg>,
-                reply: russh::server::ChannelOpenHandle,
-                _session: &mut Session,
-            ) -> Result<(), Self::Error> {
-                // Dropping the handle without accepting sends
-                // AdministrativelyProhibited back to the client.
-                reply.accept().await;
-                self.channels.push(channel);
-                Ok(())
-            }
-
-            async fn exec_request(
-                &mut self,
-                channel: ChannelId,
-                data: &[u8],
-                session: &mut Session,
-            ) -> Result<(), Self::Error> {
-                let command = String::from_utf8_lossy(data).to_string();
-                session.channel_success(channel)?;
-
-                // Echo the command back so the test can prove the right bytes
-                // travelled, and emit on both streams plus a non-zero status.
-                session.data(channel, format!("out:{command}\n"))?;
-                session.extended_data(channel, 1, "err:diagnostic\n".to_string())?;
-                session.exit_status_request(channel, 3)?;
-                session.eof(channel)?;
-                session.close(channel)?;
-                Ok(())
-            }
-        }
-
-        /// Start the server on an ephemeral port and return it.
-        pub async fn start() -> u16 {
-            let key = ssh_key::PrivateKey::random(&mut rand::rng(), ssh_key::Algorithm::Ed25519)
-                .expect("host key");
-            let config = Arc::new(russh::server::Config {
-                keys: vec![key],
-                ..Default::default()
-            });
-
-            let listener = TcpListener::bind("127.0.0.1:0").await.expect("bind");
-            let port = listener.local_addr().unwrap().port();
-
-            tokio::spawn(async move {
-                while let Ok((stream, _)) = listener.accept().await {
-                    let config = config.clone();
-                    tokio::spawn(async move {
-                        if let Ok(session) =
-                            russh::server::run_stream(config, stream, Server::default()).await
-                        {
-                            let _ = session.await;
-                        }
-                    });
-                }
-            });
-
-            port
-        }
-
-        /// A known_hosts path inside a fresh temp directory.
-        pub fn known_hosts(tag: &str) -> std::path::PathBuf {
-            let dir =
-                std::env::temp_dir().join(format!("easyssh-exec-{tag}-{}", std::process::id()));
-            let _ = std::fs::remove_dir_all(&dir);
-            std::fs::create_dir_all(&dir).unwrap();
-            dir.join("known_hosts")
-        }
-    }
+    use crate::testserver as harness;
 
     #[tokio::test]
     async fn exec_collects_stdout_stderr_and_exit_status() {
@@ -614,6 +508,83 @@ mod tests {
             .await
             .expect("reconnect");
         assert!(!again.first_contact, "the host should now be known");
+    }
+
+    /// The authorized_keys script is the heart of the headline feature, and a
+    /// string that merely looks right is not evidence. These run it under a
+    /// real shell with HOME pointed at a temp directory.
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn installs_the_public_key_and_is_idempotent() {
+        let home = harness::known_hosts("install")
+            .parent()
+            .unwrap()
+            .to_path_buf();
+        let port = harness::start_with_shell(home.clone()).await;
+        let kh = harness::known_hosts("install-kh");
+
+        let session = connect_password("127.0.0.1", port, "someone", harness::PASSWORD, &kh)
+            .await
+            .expect("connect");
+
+        let key = "ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAIExample easySSH@studio";
+
+        let (already, _) = install_public_key(&session.handle, key)
+            .await
+            .expect("install");
+        assert!(
+            !already,
+            "a fresh authorized_keys should not report the key as present"
+        );
+
+        let authorized = home.join(".ssh/authorized_keys");
+        let body = std::fs::read_to_string(&authorized).expect("authorized_keys written");
+        assert_eq!(body.trim(), key);
+
+        // Permissions are the usual reason sshd silently ignores a key.
+        use std::os::unix::fs::PermissionsExt;
+        let mode = |p: &std::path::Path| std::fs::metadata(p).unwrap().permissions().mode() & 0o777;
+        assert_eq!(mode(&authorized), 0o600, "authorized_keys must be private");
+        assert_eq!(mode(&home.join(".ssh")), 0o700, "~/.ssh must be private");
+
+        // Running again must not duplicate the line.
+        let (already, _) = install_public_key(&session.handle, key)
+            .await
+            .expect("reinstall");
+        assert!(
+            already,
+            "the second run should report the key as already present"
+        );
+        let body = std::fs::read_to_string(&authorized).unwrap();
+        assert_eq!(body.matches(key).count(), 1, "the key was appended twice");
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn installing_a_second_key_keeps_the_first() {
+        let home = harness::known_hosts("two-keys")
+            .parent()
+            .unwrap()
+            .to_path_buf();
+        let port = harness::start_with_shell(home.clone()).await;
+        let kh = harness::known_hosts("two-keys-kh");
+
+        let session = connect_password("127.0.0.1", port, "someone", harness::PASSWORD, &kh)
+            .await
+            .expect("connect");
+
+        let first = "ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAIFirst first@host";
+        let second = "ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAISecond second@host";
+        install_public_key(&session.handle, first)
+            .await
+            .expect("first");
+        install_public_key(&session.handle, second)
+            .await
+            .expect("second");
+
+        let body = std::fs::read_to_string(home.join(".ssh/authorized_keys")).unwrap();
+        assert!(body.contains(first), "the existing key was clobbered");
+        assert!(body.contains(second));
     }
 
     #[tokio::test]

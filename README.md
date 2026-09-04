@@ -229,7 +229,7 @@ add them as repository secrets for the release workflow.
 
 ```bash
 cd src-tauri
-cargo test           # 32 tests, including a real SSH server harness
+cargo test           # 41 tests, including a real SSH server harness
 cargo clippy --all-targets -- -D warnings
 cargo fmt
 ```
@@ -237,6 +237,12 @@ cargo fmt
 CI runs tests on macOS and Windows, checks the UI wiring, and **builds the
 Windows installers on every push** — the Windows code paths cannot be compiled
 on a Mac, so that job is what proves they work.
+
+`testserver.rs` is a real SSH server used by the tests, so the parts that matter
+most are exercised rather than merely read: authenticating, forwarding a port
+end to end, and running the `authorized_keys` script under a real shell with
+`HOME` pointed at a throwaway directory — which checks the resulting file
+permissions and that a second run does not duplicate the key.
 
 ### Layout
 
@@ -250,6 +256,8 @@ src-tauri/src/
   knownhosts.rs  reading and editing known_hosts
   keys.rs        key discovery, inspection and generation
   terminal.rs    handing an ssh command to the platform's terminal
+  probe.rs       background reachability and key-login checks
+  testserver.rs  a real SSH server, for tests
   store.rs       profiles.json and settings.json
   state.rs       live sessions, tunnels, and config-derived connections
   model.rs       types shared with the UI

@@ -11,6 +11,8 @@ mod sshconfig;
 mod state;
 mod store;
 mod terminal;
+#[cfg(test)]
+mod testserver;
 mod tunnels;
 
 use std::time::{Duration, SystemTime};
