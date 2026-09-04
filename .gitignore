@@ -1,0 +1,17 @@
+# Rust
+/src-tauri/target/
+**/*.rs.bk
+
+# Tauri generated
+/src-tauri/gen/schemas/
+
+# Build output
+/dist/
+
+# macOS
+.DS_Store
+
+# Editors
+.idea/
+.vscode/
+*.swp

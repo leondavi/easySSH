@@ -1,0 +1,166 @@
+# Runs on every push and pull request.
+#
+# The point of the Windows jobs is that easySSH is developed on a Mac: the
+# Windows code paths (terminal launching, key ACLs, installer bundling) cannot
+# be compiled or run there, so CI is the only thing that proves they work.
+
+name: CI
+
+on:
+  push:
+    branches: [master, main]
+  pull_request:
+  workflow_dispatch:
+
+env:
+  CARGO_TERM_COLOR: always
+  RUST_BACKTRACE: 1
+
+jobs:
+  test:
+    name: Test (${{ matrix.os }})
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [macos-latest, windows-latest]
+    runs-on: ${{ matrix.os }}
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          components: clippy, rustfmt
+
+      - uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: src-tauri
+
+      # Catches anything inside `#[cfg(windows)]` / `#[cfg(unix)]` that the
+      # other platform's build never sees.
+      - name: Clippy
+        working-directory: src-tauri
+        run: cargo clippy --all-targets -- -D warnings
+
+      - name: Format
+        working-directory: src-tauri
+        run: cargo fmt --check
+
+      - name: Test
+        working-directory: src-tauri
+        run: cargo test
+
+  frontend:
+    name: Front end
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+
+      # The UI has no build step, so a syntax check is what stands in for one.
+      - name: Syntax-check app.js
+        run: node --check ui/app.js
+
+      # Every $("id") in the JS must exist in the HTML, and every invoke()
+      # must name a command the Rust side actually registers.
+      - name: Check UI and command wiring
+        run: |
+          python3 - <<'PY'
+          import re, pathlib, sys
+
+          html = pathlib.Path("ui/index.html").read_text()
+          js   = pathlib.Path("ui/app.js").read_text()
+          main = pathlib.Path("src-tauri/src/main.rs").read_text()
+          cmds = pathlib.Path("src-tauri/src/commands.rs").read_text()
+
+          problems = []
+
+          ids_used = set(re.findall(r'\$\("([^"]+)"\)', js))
+          ids_have = set(re.findall(r'\bid="([^"]+)"', html))
+          if missing := sorted(ids_used - ids_have):
+              problems.append(f"JS references element ids not in index.html: {missing}")
+
+          registered = set(re.findall(r"commands::(\w+),", main))
+          defined    = set(re.findall(r"#\[tauri::command\]\s*\npub async fn (\w+)", cmds))
+          if orphan := sorted(defined - registered):
+              problems.append(f"commands defined but never registered: {orphan}")
+          if ghost := sorted(registered - defined):
+              problems.append(f"commands registered but not defined: {ghost}")
+
+          # `invoke(cond ? "a" : "b")` is legitimate, so only flag plain literals.
+          invoked = set(re.findall(r'invoke\("([^"]+)"', js))
+          if unknown := sorted(invoked - registered):
+              problems.append(f"JS invokes unregistered commands: {unknown}")
+
+          for p in problems:
+              print(f"::error::{p}")
+          sys.exit(1 if problems else 0)
+          PY
+
+  windows-installer:
+    name: Windows installer
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: x86_64-pc-windows-msvc
+
+      - uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: src-tauri
+
+      - name: Install the Tauri CLI
+        run: cargo install tauri-cli --version "^2" --locked
+
+      # This is the job that actually answers "does the Windows installer
+      # build?" — NSIS and WiX only run here.
+      - name: Build .exe and .msi
+        run: cargo tauri build --bundles nsis,msi
+
+      - name: Verify the installers exist
+        shell: pwsh
+        run: |
+          $dir = "src-tauri/target/release/bundle"
+          $found = Get-ChildItem -Path $dir -Recurse -Include *.exe, *.msi -ErrorAction SilentlyContinue |
+                   Where-Object { $_.Name -notlike "rw.*" }
+          if (-not $found) { throw "no installers were produced under $dir" }
+          foreach ($f in $found) {
+            "{0}  ({1:N1} MB)" -f $f.FullName, ($f.Length / 1MB)
+          }
+          if (-not ($found | Where-Object Extension -eq ".exe")) { throw "the NSIS .exe is missing" }
+          if (-not ($found | Where-Object Extension -eq ".msi")) { throw "the .msi is missing" }
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: easySSH-windows-installers
+          path: |
+            src-tauri/target/release/bundle/nsis/*.exe
+            src-tauri/target/release/bundle/msi/*.msi
+          if-no-files-found: error
+          retention-days: 14
+
+  macos-bundle:
+    name: macOS bundle
+    runs-on: macos-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: src-tauri
+
+      - name: Install the Tauri CLI
+        run: cargo install tauri-cli --version "^2" --locked
+
+      - name: Build the .app and .dmg
+        run: ./scripts/build.sh macos
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: easySSH-macos-dmg
+          path: src-tauri/target/release/bundle/dmg/*.dmg
+          if-no-files-found: error
+          retention-days: 14

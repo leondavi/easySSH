@@ -1,0 +1,194 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1" />
+<title>easySSH</title>
+<link rel="stylesheet" href="styles.css" />
+</head>
+<body>
+
+<div class="shell">
+
+  <!-- ───────────────────────────── sidebar ───────────────────────────── -->
+  <aside class="sidebar" data-tauri-drag-region>
+    <div class="sidebar-top" data-tauri-drag-region></div>
+
+    <div class="search-wrap">
+      <svg class="search-icon" viewBox="0 0 16 16" aria-hidden="true">
+        <path d="M7 1.5a5.5 5.5 0 1 0 3.34 9.87l3.15 3.14a.75.75 0 1 0 1.06-1.06l-3.14-3.15A5.5 5.5 0 0 0 7 1.5Zm-4 5.5a4 4 0 1 1 8 0 4 4 0 0 1-8 0Z"/>
+      </svg>
+      <input id="search" type="search" placeholder="Search" autocomplete="off" spellcheck="false" />
+    </div>
+
+    <div class="sidebar-scroll">
+      <div class="section-label">Connections</div>
+      <ul id="profile-list" class="profile-list"></ul>
+      <p id="sidebar-empty" class="sidebar-empty">No connections yet.</p>
+    </div>
+
+    <div class="sidebar-config">
+      <label for="ssh-location">SSH configuration</label>
+      <select id="ssh-location"></select>
+      <p id="location-summary" class="location-summary"></p>
+    </div>
+
+    <div class="sidebar-footer">
+      <button id="new-profile" class="footer-btn" title="New connection">
+        <svg viewBox="0 0 16 16" aria-hidden="true"><path d="M8 2.75a.75.75 0 0 1 .75.75v3.75h3.75a.75.75 0 0 1 0 1.5H8.75v3.75a.75.75 0 0 1-1.5 0V8.75H3.5a.75.75 0 0 1 0-1.5h3.75V3.5A.75.75 0 0 1 8 2.75Z"/></svg>
+        <span>New Connection</span>
+      </button>
+      <button id="manage-hosts" class="footer-btn icon-only" title="Known hosts">
+        <svg viewBox="0 0 16 16" aria-hidden="true"><path d="M8 1 2 3.5v4.2c0 3.4 2.5 6.3 6 7.3 3.5-1 6-3.9 6-7.3V3.5L8 1Zm0 1.7 4.5 1.9v3.1c0 2.6-1.9 4.9-4.5 5.8-2.6-.9-4.5-3.2-4.5-5.8V4.6L8 2.7Zm2.6 2.7L7.3 8.7 5.9 7.3a.75.75 0 1 0-1.06 1.06l1.94 1.94a.75.75 0 0 0 1.06 0l3.83-3.82a.75.75 0 0 0-1.06-1.06Z"/></svg>
+      </button>
+      <button id="manage-keys" class="footer-btn icon-only" title="SSH keys">
+        <svg viewBox="0 0 16 16" aria-hidden="true"><path d="M10.5 1a4.5 4.5 0 0 0-4.3 5.83L1.3 11.7a1 1 0 0 0-.3.71V14a1 1 0 0 0 1 1h2.09a1 1 0 0 0 .7-.29l.71-.71V13h1.2a.8.8 0 0 0 .8-.8V11h1.2a.8.8 0 0 0 .57-.24l.9-.9A4.5 4.5 0 1 0 10.5 1Zm1.25 4.25a1.25 1.25 0 1 1 0-2.5 1.25 1.25 0 0 1 0 2.5Z"/></svg>
+      </button>
+    </div>
+  </aside>
+
+  <!-- ───────────────────────────── main ───────────────────────────── -->
+  <main class="content">
+    <header class="titlebar" data-tauri-drag-region>
+      <div class="titlebar-info" data-tauri-drag-region>
+        <h1 id="title">easySSH</h1>
+        <p id="subtitle"></p>
+      </div>
+      <div class="titlebar-actions">
+        <button id="terminal-btn" class="btn btn-plain" hidden>
+          <svg viewBox="0 0 16 16" aria-hidden="true"><path d="M2 2.5A1.5 1.5 0 0 1 3.5 1h9A1.5 1.5 0 0 1 14 2.5v11a1.5 1.5 0 0 1-1.5 1.5h-9A1.5 1.5 0 0 1 2 13.5v-11Zm2.72 2.22a.75.75 0 0 0 0 1.06L6.44 7.5 4.72 9.22a.75.75 0 1 0 1.06 1.06l2.25-2.25a.75.75 0 0 0 0-1.06L5.78 4.72a.75.75 0 0 0-1.06 0ZM9.25 10a.75.75 0 0 0 0 1.5h2a.75.75 0 0 0 0-1.5h-2Z"/></svg>
+          Terminal
+        </button>
+        <button id="connect-btn" class="btn btn-primary" hidden>Connect</button>
+      </div>
+    </header>
+
+    <!-- empty state -->
+    <section id="empty-state" class="empty-state">
+      <div class="empty-art">
+        <svg viewBox="0 0 96 96" aria-hidden="true">
+          <rect x="8" y="16" width="80" height="64" rx="14"/>
+          <path d="M28 40l10 8-10 8M48 56h20" />
+        </svg>
+      </div>
+      <h2>Connect to a server</h2>
+      <p>Add a connection with your password once. easySSH installs your key so every login after that is instant — then opens a terminal or forwards the server's web apps to your browser.</p>
+      <button id="empty-new" class="btn btn-primary btn-large">New Connection</button>
+    </section>
+
+    <!-- detail -->
+    <section id="detail" class="detail" hidden>
+
+      <div class="card" id="card-status">
+        <div class="status-row">
+          <span id="status-dot" class="dot"></span>
+          <div class="status-text">
+            <strong id="status-title">Not connected</strong>
+            <span id="status-detail"></span>
+          </div>
+          <button id="edit-btn" class="btn btn-plain btn-small">Edit</button>
+        </div>
+        <div id="fingerprint-row" class="fingerprint" hidden>
+          <span class="mono" id="fingerprint"></span>
+        </div>
+      </div>
+
+      <div class="card">
+        <div class="card-head">
+          <h3>Authentication</h3>
+          <span id="auth-badge" class="badge"></span>
+        </div>
+
+        <div class="field-row">
+          <label>Method</label>
+          <div class="segmented" id="auth-seg" role="tablist">
+            <button data-auth="password" role="tab">Password</button>
+            <button data-auth="key" role="tab">Private key</button>
+          </div>
+        </div>
+
+        <p class="config-auth" id="config-auth" hidden></p>
+
+        <div class="field-row" id="key-row">
+          <label for="key-select">Key</label>
+          <div class="key-picker">
+            <select id="key-select"></select>
+            <button id="browse-key" class="btn btn-plain btn-small">Browse…</button>
+            <button id="generate-key" class="btn btn-plain btn-small">Generate…</button>
+            <button id="show-key" class="btn btn-plain btn-small">Public key…</button>
+          </div>
+        </div>
+        <p class="field-hint" id="key-hint"></p>
+
+        <div class="callout" id="setup-callout">
+          <div class="callout-body">
+            <strong>Set up passwordless login</strong>
+            <p>Sign in with your password once. easySSH appends the selected public key to <span class="mono">~/.ssh/authorized_keys</span> on the server and verifies it works.</p>
+          </div>
+          <button id="setup-btn" class="btn btn-primary btn-small">Set Up…</button>
+        </div>
+      </div>
+
+      <div class="card">
+        <div class="card-head">
+          <h3>Web tunnels</h3>
+          <button id="add-tunnel" class="btn btn-plain btn-small">Add Tunnel</button>
+        </div>
+        <p class="card-sub">Reach services on the server — or anything on its network — as if they ran on this machine.</p>
+        <ul id="tunnel-list" class="tunnel-list"></ul>
+        <p id="tunnel-empty" class="muted-row">No tunnels yet.</p>
+      </div>
+
+      <div class="card">
+        <div class="card-head"><h3>Terminal</h3></div>
+        <p class="card-sub">Opens your terminal app with the session already connected.</p>
+        <div class="terminal-preview mono" id="terminal-preview"></div>
+        <label class="checkbox">
+          <input type="checkbox" id="term-tunnels" checked />
+          <span>Also open this connection's tunnels in the terminal session</span>
+        </label>
+
+        <div class="run-row">
+          <input id="run-input" type="text" placeholder="Run a command on the server…" spellcheck="false" />
+          <button id="run-btn" class="btn btn-small">Run</button>
+        </div>
+        <pre id="run-output" class="run-output mono" hidden></pre>
+      </div>
+
+      <div class="card">
+        <div class="card-head"><h3>SSH configuration</h3></div>
+        <p class="card-sub">Add this server to your ssh config so <span class="mono">ssh &lt;alias&gt;</span> works from any terminal, with the key and tunnels already set.</p>
+        <div class="danger-row">
+          <div>
+            <strong id="config-state">Not in your ssh config</strong>
+            <p class="card-sub" id="config-path"></p>
+          </div>
+          <button id="add-config-btn" class="btn btn-small">Add to Config…</button>
+        </div>
+      </div>
+
+      <div class="card danger-card">
+        <div class="card-head"><h3>Danger zone</h3></div>
+        <div class="danger-row">
+          <div>
+            <strong>Delete this connection</strong>
+            <p class="card-sub">Removes it from easySSH. Nothing on the server changes.</p>
+          </div>
+          <button id="delete-btn" class="btn btn-danger btn-small">Delete…</button>
+        </div>
+      </div>
+
+    </section>
+  </main>
+</div>
+
+<!-- ───────────────────────────── sheet host ───────────────────────────── -->
+<div id="sheet-backdrop" class="sheet-backdrop" hidden>
+  <div id="sheet" class="sheet" role="dialog" aria-modal="true"></div>
+</div>
+
+<div id="toasts" class="toasts" aria-live="polite"></div>
+
+<script src="app.js"></script>
+</body>
+</html>

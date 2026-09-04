@@ -1,0 +1,35 @@
+[package]
+name = "easyssh"
+version = "0.1.0"
+description = "easySSH - effortless SSH connections, key setup and remote web tunnels"
+authors = ["easySSH contributors"]
+edition = "2021"
+rust-version = "1.89"
+
+[build-dependencies]
+tauri-build = { version = "2", features = [] }
+
+[dependencies]
+tauri = { version = "2", features = ["macos-private-api"] }
+tauri-plugin-opener = "2"
+tauri-plugin-dialog = "2"
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+tokio = { version = "1", features = ["full"] }
+russh = { version = "0.63", default-features = false, features = ["ring", "rsa", "flate2"] }
+ssh-key = { version = "=0.7.0-rc.11", default-features = false, features = ["std", "alloc", "ed25519", "rsa", "rand_core", "encryption"] }
+rand = { version = "0.10", features = ["sys_rng", "thread_rng"] }
+anyhow = "1"
+thiserror = "2"
+dirs = "6"
+uuid = { version = "1", features = ["v4", "serde"] }
+log = "0.4"
+
+[features]
+custom-protocol = ["tauri/custom-protocol"]
+
+[profile.release]
+opt-level = "s"
+lto = true
+codegen-units = 1
+strip = true

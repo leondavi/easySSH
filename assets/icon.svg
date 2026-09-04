@@ -1,0 +1,31 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="1024" height="1024" viewBox="0 0 1024 1024">
+  <defs>
+    <linearGradient id="body" x1="0" y1="0" x2="0" y2="1">
+      <stop offset="0%" stop-color="#5B8DEF"/>
+      <stop offset="52%" stop-color="#3A6FE0"/>
+      <stop offset="100%" stop-color="#274BC4"/>
+    </linearGradient>
+    <linearGradient id="gloss" x1="0" y1="0" x2="0" y2="1">
+      <stop offset="0%" stop-color="#ffffff" stop-opacity="0.34"/>
+      <stop offset="46%" stop-color="#ffffff" stop-opacity="0.05"/>
+      <stop offset="100%" stop-color="#ffffff" stop-opacity="0"/>
+    </linearGradient>
+    <filter id="drop" x="-30%" y="-30%" width="160%" height="160%">
+      <feDropShadow dx="0" dy="18" stdDeviation="26" flood-color="#0b1c3f" flood-opacity="0.42"/>
+    </filter>
+  </defs>
+
+  <!-- squircle body, macOS proportions -->
+  <g filter="url(#drop)">
+    <rect x="112" y="96" width="800" height="800" rx="188" ry="188" fill="url(#body)"/>
+    <rect x="112" y="96" width="800" height="800" rx="188" ry="188" fill="url(#gloss)"/>
+    <rect x="112.5" y="96.5" width="799" height="799" rx="187.5" ry="187.5"
+          fill="none" stroke="#ffffff" stroke-opacity="0.30" stroke-width="3"/>
+  </g>
+
+  <!-- prompt chevron + cursor: a terminal, already connected -->
+  <g fill="none" stroke="#ffffff" stroke-width="58" stroke-linecap="round" stroke-linejoin="round">
+    <path d="M356 386 L470 496 L356 606"/>
+    <path d="M548 620 L700 620"/>
+  </g>
+</svg>
