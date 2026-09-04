@@ -138,6 +138,11 @@ pub async fn start() -> u16 {
 
 /// Start a server that executes commands for real, with `HOME` bound to
 /// a sandbox directory.
+///
+/// Unix only: it shells out to `sh`, and the tests that use it check POSIX
+/// file modes. Without the gate it is dead code on Windows, which `clippy
+/// -D warnings` rightly refuses.
+#[cfg(unix)]
 pub async fn start_with_shell(home: std::path::PathBuf) -> u16 {
     start_with(Some(home)).await
 }
