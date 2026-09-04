@@ -46,6 +46,11 @@ jobs:
         with:
           workspaces: src-tauri
 
+      # tauri-action runs whatever `tauriScript` names, so the CLI has to be
+      # on PATH before it starts. There is no package.json here to install from.
+      - name: Install the Tauri CLI
+        run: cargo install tauri-cli --version "^2" --locked
+
       - name: Build
         uses: tauri-apps/tauri-action@v0
         env:

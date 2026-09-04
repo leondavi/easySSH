@@ -6,7 +6,7 @@
 
 use std::process::Command;
 
-use anyhow::{anyhow, Context, Result};
+use anyhow::Result;
 
 use crate::model::{AuthMethod, Profile};
 
@@ -96,6 +96,8 @@ pub fn open(profile: &Profile, include_tunnels: bool) -> Result<String> {
 
 #[cfg(target_os = "macos")]
 fn launch(command: &str) -> Result<()> {
+    use anyhow::{anyhow, Context as _};
+
     // Prefer iTerm when the user has it, then fall back to Terminal.app.
     let script = format!(
         r#"
@@ -148,6 +150,7 @@ end tell"#,
 
 #[cfg(target_os = "windows")]
 fn launch(command: &str) -> Result<()> {
+    use anyhow::Context as _;
     use std::os::windows::process::CommandExt;
 
     /// Give the spawned shell its own console. easySSH is a windows-subsystem
@@ -180,6 +183,8 @@ fn launch(command: &str) -> Result<()> {
 
 #[cfg(all(not(target_os = "macos"), not(target_os = "windows")))]
 fn launch(command: &str) -> Result<()> {
+    use anyhow::anyhow;
+
     // Best-effort on Linux so `cargo run` works for contributors.
     const TERMINALS: &[(&str, &[&str])] = &[
         ("x-terminal-emulator", &["-e"]),

@@ -1234,6 +1234,24 @@ listen("tunnel-error", (e) => fail(e.payload.error));
 listen("profiles-changed", () => reloadProfiles());
 listen("ssh-location-changed", async () => { await reloadConfigHosts(); renderDetail(); });
 
+/* The ssh config was edited outside easySSH; the backend has already re-read
+   it, so refresh what the sidebar and detail pane are showing. */
+listen("ssh-config-changed", async () => {
+  const before = state.profiles.filter((p) => p.from_config).length;
+  await reloadProfiles();
+  await reloadConfigHosts();
+  await reloadLocations();
+  renderDetail();
+
+  const after = state.profiles.filter((p) => p.from_config).length;
+  const delta = after - before;
+  toast(delta === 0
+    ? "ssh config changed — connections refreshed"
+    : delta > 0
+      ? `ssh config changed — ${delta} connection${delta === 1 ? "" : "s"} added`
+      : `ssh config changed — ${-delta} connection${delta === -1 ? "" : "s"} removed`);
+});
+
 /* Keep connection counters fresh while a session is open. */
 setInterval(() => {
   if ([...state.statuses.values()].some((s) => s.connected)) reloadStatuses();

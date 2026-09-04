@@ -96,6 +96,9 @@ easySSH treats `~/.ssh/config` as the source of truth, not a one-time import.
   tagged `cfg`, with the key from its `IdentityFile` already selected.
   `Include` directives and `Host *` defaults are followed.
 - **Delete a `Host` block and the connection disappears** from easySSH too.
+- **Edits show up while the app is open.** easySSH watches the config file, so
+  a `Host` block you add or remove in your editor appears or disappears within a
+  couple of seconds — no restart.
 - **Edit one and it becomes yours.** Changing settings or adding a tunnel makes
   it a saved connection that the config no longer governs — so your work is
   never silently rebuilt away.

@@ -12,7 +12,58 @@ mod store;
 mod terminal;
 mod tunnels;
 
+use std::time::{Duration, SystemTime};
+
+use tauri::{AppHandle, Emitter, Manager};
+
 use state::AppState;
+
+/// How often the ssh config is checked for edits made outside easySSH.
+const CONFIG_POLL: Duration = Duration::from_secs(2);
+
+/// Re-read the ssh config whenever it changes on disk.
+///
+/// Without this the connection list is only built at startup, so adding or
+/// deleting a `Host` block in an editor appears to do nothing until easySSH is
+/// restarted. Polling the modification time is enough here — the file is tiny
+/// and changes at human speed — and it avoids a platform-specific file-watching
+/// dependency.
+fn watch_ssh_config(app: AppHandle) {
+    tauri::async_runtime::spawn(async move {
+        // `None` until the first observation, so startup does not count as a change.
+        let mut seen: Option<(std::path::PathBuf, Option<SystemTime>)> = None;
+
+        loop {
+            tokio::time::sleep(CONFIG_POLL).await;
+
+            let state = app.state::<AppState>();
+            let path = {
+                let inner = state.inner.lock().await;
+                sshconfig::config_path_for(&inner.ssh_dir())
+            };
+            // A missing file reads as `None`, so creating or deleting the config
+            // counts as a change just as editing it does.
+            let stamp = std::fs::metadata(&path)
+                .ok()
+                .and_then(|m| m.modified().ok());
+
+            let changed = matches!(&seen, Some((p, s)) if *p != path || *s != stamp);
+            seen = Some((path, stamp));
+            if !changed {
+                continue;
+            }
+
+            {
+                let mut inner = state.inner.lock().await;
+                inner.sync_config_profiles();
+            }
+            // One event only: the front end's `ssh-config-changed` handler
+            // already reloads the profile list, so also emitting
+            // `profiles-changed` would fetch and re-render it twice.
+            let _ = app.emit("ssh-config-changed", ());
+        }
+    });
+}
 
 fn main() {
     let profiles = store::load_profiles().unwrap_or_else(|e| {
@@ -55,6 +106,10 @@ fn main() {
             commands::remove_known_hosts,
             commands::known_hosts_path,
         ])
+        .setup(|app| {
+            watch_ssh_config(app.handle().clone());
+            Ok(())
+        })
         .run(tauri::generate_context!())
         .expect("easySSH failed to start");
 }
