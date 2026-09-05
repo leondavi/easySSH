@@ -61,13 +61,46 @@ jobs:
         if: steps.tauri-cli.outputs.cache-hit != 'true'
         run: cargo install tauri-cli --version "^2" --locked
 
+      # An unset secret still reaches the bundler as an empty variable, and the
+      # macOS signing path triggers on the variable being *present* — which is
+      # how a repository with no certificate ended up failing at `security
+      # import` instead of producing an unsigned build. So decide first, then
+      # run the build with the Apple variables or without them.
+      - name: Is there a signing certificate?
+        id: signing
+        shell: bash
+        env:
+          APPLE_CERTIFICATE: ${{ secrets.APPLE_CERTIFICATE }}
+        run: |
+          if [ -n "$APPLE_CERTIFICATE" ]; then
+            echo "sign=true" >> "$GITHUB_OUTPUT"
+          else
+            echo "sign=false" >> "$GITHUB_OUTPUT"
+          fi
+
       - name: Build
+        if: steps.signing.outputs.sign == 'false'
         uses: tauri-apps/tauri-action@v0
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-          # Set these repository secrets to ship a signed, notarised macOS build.
-          # Without them the .dmg still builds, but users must right-click → Open
-          # on first launch.
+        with:
+          projectPath: .
+          tauriScript: cargo tauri
+          args: --target ${{ matrix.target }} --bundles ${{ matrix.bundles }}
+          tagName: ${{ github.ref_name }}
+          releaseName: easySSH ${{ github.ref_name }}
+          releaseDraft: true
+          prerelease: false
+
+      # The same build, signed and notarised. Set APPLE_CERTIFICATE,
+      # APPLE_CERTIFICATE_PASSWORD, APPLE_SIGNING_IDENTITY, APPLE_ID,
+      # APPLE_PASSWORD and APPLE_TEAM_ID as repository secrets to take this
+      # path; without it users must right-click → Open on first launch.
+      - name: Build (signed)
+        if: steps.signing.outputs.sign == 'true'
+        uses: tauri-apps/tauri-action@v0
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
           APPLE_CERTIFICATE: ${{ secrets.APPLE_CERTIFICATE }}
           APPLE_CERTIFICATE_PASSWORD: ${{ secrets.APPLE_CERTIFICATE_PASSWORD }}
           APPLE_SIGNING_IDENTITY: ${{ secrets.APPLE_SIGNING_IDENTITY }}
