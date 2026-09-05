@@ -109,13 +109,27 @@ The remote address is resolved *on the server*, not here. That is what lets you
 reach a service bound to the server's loopback interface, or a machine that has
 no route from your laptop at all.
 
-Mark a tunnel **auto-start** and it comes up the moment you connect.
+Mark a tunnel **auto-start** and it comes up the moment you connect. Add or
+edit one while the connection is already open and easySSH starts it there and
+then, so it never sits idle waiting for a reconnect. The switch beside each
+tunnel turns it on and off by hand.
 
 ---
 
 ## Working with your ssh config
 
-easySSH treats `~/.ssh/config` as the source of truth, not a one-time import.
+Your config and easySSH's own connections are kept apart:
+
+- `~/.ssh/config` is **yours**. easySSH reads it, and never writes to it beyond
+  a single `Include ez_config` line at the top.
+- `~/.ssh/ez_config` is **easySSH's**, in the same directory and the same
+  OpenSSH syntax, with `IdentityFile` and `LocalForward` lines filled in — so
+  every connection you save here also works as plain `ssh <alias>` from any
+  terminal. The few things ssh config cannot express (colours, tunnel names and
+  schemes) sit beside it in `ez_config.json`.
+
+Both live wherever the `.ssh` directory you have selected is, so a connection
+travels with the keys it uses.
 
 - **Choose which config.** The picker at the bottom of the sidebar lists every
   `.ssh` location it found, with the number of keys and hosts in each. Switch
@@ -127,9 +141,12 @@ easySSH treats `~/.ssh/config` as the source of truth, not a one-time import.
 - **Edits show up while the app is open.** easySSH watches the config file, so
   a `Host` block you add or remove in your editor appears or disappears within a
   couple of seconds — no restart.
-- **Edit one and it becomes yours.** Changing settings or adding a tunnel makes
-  it a saved connection that the config no longer governs — so your work is
-  never silently rebuilt away.
+- **Import one and it becomes yours.** **Import** on a `cfg` connection — or
+  simply editing it, or adding a tunnel — copies it into `ez_config`, where the
+  config no longer governs it and your work is never silently rebuilt away.
+  Your own config file keeps its `Host` block untouched.
+- **Hide them.** Untick *Show hosts from this config* under the picker to leave
+  only the connections easySSH owns. A host you are connected to stays listed.
 - **Add a server to the config.** Click **Add to Config** and easySSH writes a
   `Host` block with `IdentityFile` and `LocalForward` lines filled in, so plain
   `ssh myserver` works from any terminal afterwards. Existing blocks are never
@@ -169,7 +186,7 @@ removal is refused outright if the file changed since the list was loaded.
 ## How it handles your credentials
 
 - **Passwords are never written to disk.** They are held only for the length of
-  a single connection or key install. `profiles.json` has no field for one.
+  a single connection or key install. `ez_config` has no field for one.
 - **Host keys are pinned.** Trust-on-first-use: an unknown host is accepted,
   recorded, and its fingerprint shown to you. A host whose key has *changed* is
   **refused** — that is what a man-in-the-middle looks like.
@@ -178,8 +195,11 @@ removal is refused outright if the file changed since the list was loaded.
 - **The system `ssh` does the terminal work.** easySSH hands it a command; it
   never proxies your interactive session.
 
-Settings live in `~/Library/Application Support/easySSH/` on macOS and
-`%APPDATA%\easySSH\` on Windows.
+Connections live in `ez_config` in your `.ssh` directory, 0600 like everything
+else there. Only app settings — which `.ssh` directory is in focus — stay in
+`~/Library/Application Support/easySSH/` on macOS and `%APPDATA%\easySSH\` on
+Windows. Connections saved by earlier versions are moved out of `profiles.json`
+into `ez_config` the first time you run this one.
 
 ---
 
@@ -258,7 +278,8 @@ src-tauri/src/
   terminal.rs    handing an ssh command to the platform's terminal
   probe.rs       background reachability and key-login checks
   testserver.rs  a real SSH server, for tests
-  store.rs       profiles.json and settings.json
+  ezconfig.rs    the ez_config connection store in ~/.ssh
+  store.rs       app settings, and the move off the old profiles.json
   state.rs       live sessions, tunnels, and config-derived connections
   model.rs       types shared with the UI
 

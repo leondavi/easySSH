@@ -51,6 +51,7 @@ const state = {
   locations: [],        // every .ssh directory found on this machine
   location: null,       // the one in focus
   configHosts: [],      // Host blocks parsed from the focused config
+  showConfigHosts: true, // list hosts read from the ssh config alongside our own
 };
 
 const selected = () => state.profiles.find((p) => p.id === state.selectedId) || null;
@@ -190,10 +191,19 @@ function bindSubmit(button, errorBox, action) {
 
 /* ── rendering: sidebar ───────────────────────────────────────────────── */
 
+/** Connections the sidebar should list. Hosts that only exist in the ssh
+ *  config can be hidden, leaving easySSH's own — but never one that is
+ *  connected or selected, which would make it disappear mid-use. */
+function listedProfiles() {
+  if (state.showConfigHosts) return state.profiles;
+  return state.profiles.filter((p) =>
+    !p.from_config || statusOf(p.id).connected || p.id === state.selectedId);
+}
+
 function renderSidebar() {
   const list = $("profile-list");
   const term = state.filter.trim().toLowerCase();
-  const shown = state.profiles.filter((p) =>
+  const shown = listedProfiles().filter((p) =>
     !term ||
     p.name.toLowerCase().includes(term) ||
     p.host.toLowerCase().includes(term) ||
@@ -235,9 +245,11 @@ function renderSidebar() {
   }));
 
   $("sidebar-empty").hidden = shown.length > 0;
-  $("sidebar-empty").textContent = state.profiles.length
+  $("sidebar-empty").textContent = state.filter.trim()
     ? "No matches."
-    : "No connections yet.";
+    : state.profiles.length
+      ? "No saved connections — the hosts from your ssh config are hidden."
+      : "No connections yet.";
 }
 
 /* ── rendering: detail ────────────────────────────────────────────────── */
@@ -356,6 +368,10 @@ function renderDetail() {
     : "Not in your ssh config";
   $("config-path").textContent = state.location?.config_path ?? "";
   $("add-config-btn").textContent = inConfig ? "Add Another Alias…" : "Add to Config…";
+
+  // A config host is on loan until it is imported; only then is it ours to
+  // give tunnels and a key to.
+  $("import-row").hidden = !p.from_config;
 
   // Entries that only exist in the config cannot be deleted from here.
   $("delete-btn").disabled = !!p.from_config;
@@ -499,6 +515,14 @@ async function reloadLocations() {
   renderLocationPicker();
 }
 
+async function reloadSettings() {
+  try {
+    const s = await invoke("app_settings");
+    state.showConfigHosts = s.show_config_hosts !== false;
+  } catch { /* keep the current value */ }
+  $("show-config-hosts").checked = state.showConfigHosts;
+}
+
 async function reloadConfigHosts() {
   try {
     state.configHosts = await invoke("list_ssh_hosts");
@@ -524,7 +548,9 @@ function renderLocationPicker() {
   // Always say what the current selection produced — including when it
   // produced nothing, so an empty list reads as an answer rather than a
   // failure to update.
-  const fromConfig = state.profiles.filter((p) => p.from_config).length;
+  const fromConfig = state.showConfigHosts
+    ? state.profiles.filter((p) => p.from_config).length
+    : 0;
   const loc = state.location;
   const n = state.configHosts.length;
   const summary = $("location-summary");
@@ -540,7 +566,9 @@ function renderLocationPicker() {
   } else {
     summary.textContent =
       `${n} host${n === 1 ? "" : "s"} in config  ·  ` +
-      (fromConfig ? `${fromConfig} shown below` : "all already saved");
+      (state.showConfigHosts
+        ? (fromConfig ? `${fromConfig} shown below` : "all already saved")
+        : "hidden");
   }
 }
 
@@ -821,11 +849,37 @@ async function browseForKey() {
 
 /* tunnels */
 
+/** Make a just-saved tunnel match the live session: restart it if it was
+ *  already forwarding, or start it if it is meant to come up on its own. */
+async function applyTunnelToLiveSession(profileId, t, wasRunning) {
+  if (!statusOf(profileId).connected) return;
+  if (!wasRunning && !t.auto_start) return;
+  try {
+    if (wasRunning) {
+      await invoke("stop_tunnel", { profileId, tunnelId: t.id });
+    }
+    await invoke("start_tunnel", { profileId, tunnelId: t.id });
+  } catch (e) { fail(e); }
+  await reloadStatuses();
+}
+
 async function toggleTunnel(p, t, running) {
   try {
     await invoke(running ? "stop_tunnel" : "start_tunnel", { profileId: p.id, tunnelId: t.id });
   } catch (e) { fail(e); }
   await reloadStatuses();
+}
+
+/** Take a host that only exists in the ssh config and make it easySSH's own,
+ *  written to ez_config from here on. */
+async function importHost(p) {
+  try {
+    const saved = await invoke("import_ssh_host", { profileId: p.id });
+    await reloadProfiles();
+    await reloadConfigHosts();
+    select(saved.id);
+    toast(`${saved.name} imported — it is now saved in easySSH`);
+  } catch (e) { fail(e); }
 }
 
 function tunnelSheet(p, existing) {
@@ -865,8 +919,14 @@ function tunnelSheet(p, existing) {
       const tunnels = existing
         ? p.tunnels.map((x) => (x.id === t.id ? next : x))
         : [...p.tunnels, next];
+      const wasRunning = !!(statusOf(p.id).tunnels || []).find((x) => x.id === next.id)?.running;
       await saveProfile({ ...p, tunnels });
       close();
+      // A tunnel is only auto-started when the connection opens, so one added
+      // or edited on a session that is already up would otherwise sit idle
+      // until the next reconnect. Bring it up here instead, and restart a
+      // running one so the edited ports are the ones actually forwarded.
+      await applyTunnelToLiveSession(p.id, next, wasRunning);
     });
 
     const remove = existing ? h("button", {
@@ -1271,6 +1331,19 @@ async function runQuickCommand() {
 $("run-btn").addEventListener("click", runQuickCommand);
 $("run-input").addEventListener("keydown", (e) => { if (e.key === "Enter") runQuickCommand(); });
 $("delete-btn").addEventListener("click", () => selected() && confirmDelete(selected()));
+$("import-btn").addEventListener("click", () => selected() && importHost(selected()));
+$("show-config-hosts").addEventListener("change", async (e) => {
+  const show = e.target.checked;
+  try {
+    await invoke("set_show_config_hosts", { show });
+    state.showConfigHosts = show;
+  } catch (err) {
+    e.target.checked = state.showConfigHosts;   // the setting did not stick
+    fail(err);
+  }
+  renderSidebar();
+  renderLocationPicker();
+});
 $("setup-btn").addEventListener("click", () => selected() && setupSheet(selected()));
 $("add-tunnel").addEventListener("click", () => selected() && tunnelSheet(selected(), null));
 $("auth-toggle").addEventListener("click", () => {
@@ -1369,6 +1442,7 @@ setInterval(() => {
 /* ── boot ─────────────────────────────────────────────────────────────── */
 
 (async function boot() {
+  await reloadSettings();
   await reloadLocations();
   await reloadKeys();
   await reloadProfiles();

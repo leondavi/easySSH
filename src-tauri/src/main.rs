@@ -2,6 +2,7 @@
 #![cfg_attr(not(debug_assertions), windows_subsystem = "windows")]
 
 mod commands;
+mod ezconfig;
 mod keys;
 mod knownhosts;
 mod model;
@@ -223,13 +224,34 @@ async fn emit_probes(app: &AppHandle) {
     let _ = app.emit("probe-status", all);
 }
 
-fn main() {
-    let profiles = store::load_profiles().unwrap_or_else(|e| {
-        eprintln!("easySSH: could not read saved connections: {e}");
-        Vec::new()
-    });
+/// Load the connections easySSH owns, moving them out of the old
+/// `profiles.json` first if this is the first run since that changed.
+fn load_connections(settings: &model::Settings) -> Vec<Profile> {
+    let dir = state::ssh_dir_for(settings);
+    let mut profiles = ezconfig::load(&dir);
 
+    if let Some(legacy) = store::take_legacy_profiles() {
+        // Keep whatever is already in ez_config: it is the newer of the two.
+        for old in legacy {
+            let known = profiles.iter().any(|p| {
+                p.host.eq_ignore_ascii_case(&old.host)
+                    && p.port == old.port
+                    && p.username == old.username
+            });
+            if !known {
+                profiles.push(old);
+            }
+        }
+        if let Err(e) = ezconfig::save(&dir, &profiles) {
+            eprintln!("easySSH: could not write {}: {e}", ezconfig::path_for(&dir).display());
+        }
+    }
+    profiles
+}
+
+fn main() {
     let settings = store::load_settings();
+    let profiles = load_connections(&settings);
 
     tauri::Builder::default()
         .plugin(tauri_plugin_opener::init())
@@ -264,6 +286,9 @@ fn main() {
             commands::remove_known_hosts,
             commands::known_hosts_path,
             commands::probe_statuses,
+            commands::app_settings,
+            commands::import_ssh_host,
+            commands::set_show_config_hosts,
         ])
         .setup(|app| {
             watch_ssh_config(app.handle().clone());

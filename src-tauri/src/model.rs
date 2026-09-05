@@ -186,11 +186,29 @@ pub struct SshHostEntry {
 }
 
 /// User settings that are not tied to one connection.
-#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct Settings {
     /// The `.ssh` directory the app is currently focused on. `None` means the default.
     #[serde(default)]
     pub ssh_dir: Option<String>,
+    /// Whether hosts read from the user's ssh config are listed alongside the
+    /// connections easySSH owns. Off leaves only easySSH's own list.
+    #[serde(default = "yes")]
+    pub show_config_hosts: bool,
+}
+
+/// `serde` needs a function to default a `bool` to true.
+fn yes() -> bool {
+    true
+}
+
+impl Default for Settings {
+    fn default() -> Self {
+        Self {
+            ssh_dir: None,
+            show_config_hosts: true,
+        }
+    }
 }
 
 /// One entry in a `known_hosts` file.

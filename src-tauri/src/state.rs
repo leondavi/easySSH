@@ -61,6 +61,15 @@ pub struct ProbeRecord {
     pub next_key_check: Option<std::time::Instant>,
 }
 
+/// The `.ssh` directory a set of settings points at. Free-standing so startup
+/// can find the connection store before there is an `Inner` to ask.
+pub fn ssh_dir_for(settings: &Settings) -> std::path::PathBuf {
+    match &settings.ssh_dir {
+        Some(dir) if !dir.is_empty() => std::path::PathBuf::from(dir),
+        _ => crate::keys::default_ssh_dir_path().unwrap_or_default(),
+    }
+}
+
 #[derive(Default)]
 pub struct Inner {
     pub profiles: Vec<Profile>,
@@ -73,10 +82,12 @@ impl Inner {
     /// The `.ssh` directory the user is focused on, falling back to the
     /// conventional one for this OS.
     pub fn ssh_dir(&self) -> std::path::PathBuf {
-        match &self.settings.ssh_dir {
-            Some(dir) if !dir.is_empty() => std::path::PathBuf::from(dir),
-            _ => crate::keys::default_ssh_dir_path().unwrap_or_default(),
-        }
+        ssh_dir_for(&self.settings)
+    }
+
+    /// Write the connections easySSH owns to `ez_config` in that directory.
+    pub fn persist(&self) -> std::io::Result<()> {
+        crate::ezconfig::save(&self.ssh_dir(), &self.profiles)
     }
 
     pub fn profile(&self, id: &str) -> Option<&Profile> {
@@ -247,6 +258,7 @@ mod tests {
             sessions: HashMap::new(),
             settings: Settings {
                 ssh_dir: Some(dir.display().to_string()),
+                ..Settings::default()
             },
             probes: HashMap::new(),
         }

@@ -1,4 +1,6 @@
-//! On-disk persistence for profiles. Passwords are never written here.
+//! On-disk persistence for the app's own settings, and the one-time move of
+//! saved connections out of the application data directory into `ez_config`.
+//! Passwords are never written anywhere.
 
 use std::fs;
 use std::io;
@@ -19,37 +21,24 @@ fn profiles_path() -> io::Result<PathBuf> {
     Ok(app_dir()?.join("profiles.json"))
 }
 
-pub fn load_profiles() -> io::Result<Vec<Profile>> {
-    let path = profiles_path()?;
-    if !path.exists() {
-        return Ok(Vec::new());
+/// Read the connections saved by versions that kept them in the application
+/// data directory, and remove that file.
+///
+/// Connections now live in `ez_config` inside the `.ssh` directory, next to
+/// the keys and the config they belong with. Returning `None` once the file is
+/// gone is what makes this run exactly once.
+pub fn take_legacy_profiles() -> Option<Vec<Profile>> {
+    let path = profiles_path().ok()?;
+    let raw = fs::read_to_string(&path).ok()?;
+    let profiles: Vec<Profile> = serde_json::from_str(&raw).unwrap_or_else(|e| {
+        log::warn!("the old profiles.json could not be read ({e}); it will be left in place");
+        Vec::new()
+    });
+    if profiles.is_empty() && !raw.trim().is_empty() && raw.trim() != "[]" {
+        return None; // unreadable: keep it rather than throw the user's list away
     }
-    let raw = fs::read_to_string(&path)?;
-    if raw.trim().is_empty() {
-        return Ok(Vec::new());
-    }
-    // A profile we cannot parse should not take the whole list down with it.
-    match serde_json::from_str(&raw) {
-        Ok(profiles) => Ok(profiles),
-        Err(e) => {
-            log::warn!("profiles.json is not readable ({e}); starting from an empty list");
-            Ok(Vec::new())
-        }
-    }
-}
-
-pub fn save_profiles(profiles: &[Profile]) -> io::Result<()> {
-    let path = profiles_path()?;
-    // Config-derived entries are rebuilt from the ssh config each time, so
-    // writing them here would create a stale duplicate of the real source.
-    let owned: Vec<&Profile> = profiles.iter().filter(|p| !p.from_config).collect();
-    let body = serde_json::to_string_pretty(&owned)
-        .map_err(|e| io::Error::new(io::ErrorKind::InvalidData, e))?;
-    // Write-then-rename so a crash mid-write cannot truncate the existing file.
-    let tmp = path.with_extension("json.tmp");
-    fs::write(&tmp, body)?;
-    fs::rename(&tmp, &path)?;
-    Ok(())
+    let _ = fs::remove_file(&path);
+    Some(profiles)
 }
 
 /// Seconds since the Unix epoch.

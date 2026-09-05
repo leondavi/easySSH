@@ -287,6 +287,13 @@ fn collect(
             "include" => {
                 for pattern in value.split_whitespace() {
                     for included in resolve_include(pattern, path) {
+                        // easySSH's own file is included from the user's config
+                        // so that `ssh <alias>` works, but its hosts are already
+                        // connections in the app. Following it here would list
+                        // every one of them a second time as a config host.
+                        if crate::ezconfig::is_managed(&included) {
+                            continue;
+                        }
                         collect(&included, blocks, visited, depth + 1);
                     }
                 }
@@ -472,9 +479,15 @@ fn file_label(path: &Path) -> String {
 /// Does this config already have a `Host` block with this alias?
 pub fn has_host(dir: &Path, alias: &str) -> bool {
     let path = config_path_for(dir);
-    parse_config(&path)
+    let in_config = parse_config(&path)
         .map(|hosts| hosts.iter().any(|h| h.alias.eq_ignore_ascii_case(alias)))
-        .unwrap_or(false)
+        .unwrap_or(false);
+    // easySSH's own file is not followed when the config is parsed, but its
+    // aliases are just as taken: ssh resolves them from the same namespace.
+    in_config
+        || crate::ezconfig::aliases(dir)
+            .iter()
+            .any(|a| a.eq_ignore_ascii_case(alias))
 }
 
 /// Append a `Host` block for a profile so plain `ssh <alias>` works from any

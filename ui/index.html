@@ -30,6 +30,10 @@
     <div class="sidebar-config">
       <label for="ssh-location">SSH configuration</label>
       <select id="ssh-location"></select>
+      <label class="checkbox location-toggle">
+        <input type="checkbox" id="show-config-hosts" checked />
+        <span>Show hosts from this config</span>
+      </label>
       <p id="location-summary" class="location-summary"></p>
     </div>
 
@@ -166,7 +170,14 @@
 
       <div class="card">
         <div class="card-head"><h3>SSH configuration</h3></div>
-        <p class="card-sub">Add this server to your ssh config so <span class="mono">ssh &lt;alias&gt;</span> works from any terminal, with the key and tunnels already set.</p>
+        <p class="card-sub">Connections saved here are written to <span class="mono">~/.ssh/ez_config</span>, which your ssh config includes, so <span class="mono">ssh &lt;alias&gt;</span> works from any terminal. Add an alias to your own config file too if you would rather keep it there.</p>
+        <div class="danger-row" id="import-row" hidden>
+          <div>
+            <strong>This host comes from your ssh config</strong>
+            <p class="card-sub">easySSH is only showing it. Import it to give it tunnels, a key and a colour of its own — your config file is left as it is.</p>
+          </div>
+          <button id="import-btn" class="btn btn-primary btn-small">Import…</button>
+        </div>
         <div class="danger-row">
           <div>
             <strong id="config-state">Not in your ssh config</strong>

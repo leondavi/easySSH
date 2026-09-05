@@ -92,7 +92,7 @@ pub async fn save_profile(
         Some(existing) => *existing = profile.clone(),
         None => inner.profiles.push(profile.clone()),
     }
-    store::save_profiles(&inner.profiles).map_err(err)?;
+    inner.persist().map_err(err)?;
     Ok(profile)
 }
 
@@ -122,7 +122,7 @@ pub async fn delete_profile(
 
     let mut inner = state.inner.lock().await;
     inner.profiles.retain(|p| p.id != profile_id);
-    store::save_profiles(&inner.profiles).map_err(err)?;
+    inner.persist().map_err(err)?;
     Ok(())
 }
 
@@ -217,7 +217,7 @@ pub async fn connect(
     if let Some(p) = inner.profile_mut(&profile_id) {
         p.last_connected = Some(store::now());
     }
-    let _ = store::save_profiles(&inner.profiles);
+    let _ = inner.persist();
 
     let status = live.status(&profile).await;
     inner.sessions.insert(profile_id, live);
@@ -384,7 +384,7 @@ pub async fn setup_key_auth(
         p.key_path = Some(key.path.clone());
         p.key_installed = true;
     }
-    store::save_profiles(&inner.profiles).map_err(err)?;
+    inner.persist().map_err(err)?;
     drop(inner);
 
     let _ = app.emit("profiles-changed", ());
@@ -587,6 +587,65 @@ pub async fn list_ssh_hosts(state: State<'_, AppState>) -> Result<Vec<SshHostEnt
     let inner = state.inner.lock().await;
     let dir = inner.ssh_dir();
     sshconfig::hosts_for(&dir, &inner.profiles).map_err(anyhow_err)
+}
+
+/// The settings the front end needs to render: which `.ssh` directory is in
+/// focus, and whether config hosts are listed.
+#[tauri::command]
+pub async fn app_settings(state: State<'_, AppState>) -> Result<crate::model::Settings, String> {
+    Ok(state.inner.lock().await.settings.clone())
+}
+
+/// Copy a host defined in the user's ssh config into easySSH's own store.
+///
+/// Until this is done, a config host is shown but not owned: it is rebuilt
+/// from the config on every refresh and vanishes with its `Host` block.
+/// Importing writes it to `ez_config`, so it keeps tunnels, a colour and the
+/// key easySSH installed for it.
+#[tauri::command]
+pub async fn import_ssh_host(
+    app: AppHandle,
+    state: State<'_, AppState>,
+    profile_id: String,
+) -> Result<Profile, String> {
+    let mut inner = state.inner.lock().await;
+    let profile = inner
+        .profile_mut(&profile_id)
+        .ok_or("that connection no longer exists")?;
+    if !profile.from_config {
+        return Err("that connection is already saved in easySSH".into());
+    }
+    // Remember where it came from so the alias, and the link back to the
+    // user's config, survive the import.
+    if profile.config_alias.is_none() {
+        profile.config_alias = Some(profile.name.clone());
+    }
+    profile.from_config = false;
+    profile.customized = true;
+    let imported = profile.clone();
+
+    inner.persist().map_err(err)?;
+    drop(inner);
+
+    let _ = app.emit("profiles-changed", ());
+    Ok(imported)
+}
+
+/// Show or hide the hosts that come from the user's ssh config, leaving just
+/// the connections easySSH owns.
+#[tauri::command]
+pub async fn set_show_config_hosts(
+    app: AppHandle,
+    state: State<'_, AppState>,
+    show: bool,
+) -> Result<(), String> {
+    let mut inner = state.inner.lock().await;
+    inner.settings.show_config_hosts = show;
+    store::save_settings(&inner.settings).map_err(err)?;
+    drop(inner);
+
+    let _ = app.emit("profiles-changed", ());
+    Ok(())
 }
 
 /// Write a profile into the active config file as a `Host` block, so
