@@ -883,13 +883,25 @@ input, select, textarea { user-select: text; }
 }
 
 /* Compact copies in the sidebar rows. */
-.row-leds { display: flex; gap: 4px; flex: none; align-items: center; }
+.row-leds { display: flex; gap: 5px; flex: none; align-items: center; }
 .row-leds .led {
   width: 7px; height: 7px;
   box-shadow: 0 0 0 2px color-mix(in srgb, var(--led, var(--text-3)) 20%, transparent);
 }
-.profile-row.selected .row-leds .led { box-shadow: none; }
-.profile-row.selected .led.unknown { opacity: 0.7; }
+
+/* A selected row is painted in the accent colour, which swallows the blue lamp
+   entirely and mutes the rest. Each lamp gets a light ring to sit in, so it
+   reads as a lamp on a coloured field rather than a smudge, and the blue one
+   is lightened until it stands off its own colour. */
+.profile-row.selected .row-leds .led {
+  box-shadow: 0 0 0 1.5px rgba(255, 255, 255, 0.92);
+}
+.profile-row.selected .row-leds .led.blue { --led: #9ecbff; }
+.profile-row.selected .row-leds .led.unknown {
+  --led: rgba(0, 0, 0, 0.3);
+  box-shadow: 0 0 0 1.5px rgba(255, 255, 255, 0.5);
+  opacity: 1;
+}
 
 /* ── disclosure card ──────────────────────────────────────────────────── */
 
