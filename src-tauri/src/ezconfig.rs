@@ -101,7 +101,12 @@ fn parse(path: &Path) -> Vec<Entry> {
         // `Keyword value` and `Keyword=value` are both valid ssh config.
         let mut parts = line.splitn(2, |c: char| c.is_whitespace() || c == '=');
         let key = parts.next().unwrap_or("").to_ascii_lowercase();
-        let value = parts.next().unwrap_or("").trim().trim_start_matches('=').trim();
+        let value = parts
+            .next()
+            .unwrap_or("")
+            .trim()
+            .trim_start_matches('=')
+            .trim();
         if value.is_empty() {
             continue;
         }
@@ -179,7 +184,9 @@ pub fn load(dir: &Path) -> Vec<Profile> {
                 id: meta
                     .map(|m| m.id.clone())
                     .unwrap_or_else(|| uuid::Uuid::new_v4().to_string()),
-                name: meta.map(|m| m.name.clone()).unwrap_or_else(|| e.alias.clone()),
+                name: meta
+                    .map(|m| m.name.clone())
+                    .unwrap_or_else(|| e.alias.clone()),
                 host,
                 port: e.port.unwrap_or(22),
                 username: e.user.unwrap_or_else(local_user),
@@ -207,9 +214,9 @@ fn tunnels_for(meta: Option<&Meta>, forwards: &[(u16, String, u16)]) -> Vec<Tunn
     let mut out: Vec<Tunnel> = known
         .iter()
         .filter(|t| {
-            forwards
-                .iter()
-                .any(|(lp, h, rp)| *lp == t.local_port && *rp == t.remote_port && h == &t.remote_host)
+            forwards.iter().any(|(lp, h, rp)| {
+                *lp == t.local_port && *rp == t.remote_port && h == &t.remote_host
+            })
         })
         .cloned()
         .collect();
@@ -360,11 +367,20 @@ fn unique_alias(profile: &Profile, used: &mut HashSet<String>) -> String {
     let mut base: String = preferred
         .trim()
         .chars()
-        .map(|c| if c.is_ascii_alphanumeric() || "-_.".contains(c) { c } else { '-' })
+        .map(|c| {
+            if c.is_ascii_alphanumeric() || "-_.".contains(c) {
+                c
+            } else {
+                '-'
+            }
+        })
         .collect();
     base = base.trim_matches('-').to_string();
     if base.is_empty() {
-        base = format!("ez-{}", &profile.id.replace('-', "")[..8.min(profile.id.len())]);
+        base = format!(
+            "ez-{}",
+            &profile.id.replace('-', "")[..8.min(profile.id.len())]
+        );
     }
 
     let mut alias = base.clone();
@@ -458,7 +474,10 @@ mod tests {
         assert!(text.contains("Host serv\n"), "{text}");
         assert!(text.contains("    HostName 10.0.0.4\n"), "{text}");
         assert!(text.contains("    User david\n"), "{text}");
-        assert!(!text.contains("Port 22"), "the default port is noise: {text}");
+        assert!(
+            !text.contains("Port 22"),
+            "the default port is noise: {text}"
+        );
         assert!(
             text.contains("    LocalForward 127.0.0.1:4000 localhost:4000\n"),
             "{text}"
@@ -479,7 +498,10 @@ mod tests {
             1,
             "the include must not accumulate: {text}"
         );
-        assert!(text.contains("Host mine"), "the user's own hosts survive: {text}");
+        assert!(
+            text.contains("Host mine"),
+            "the user's own hosts survive: {text}"
+        );
         // And it comes before any Host block, or it would apply to that host only.
         assert!(text.find("Include").unwrap() < text.find("Host mine").unwrap());
     }
@@ -487,7 +509,11 @@ mod tests {
     #[test]
     fn two_connections_with_the_same_name_get_distinct_aliases() {
         let dir = tmpdir("aliases");
-        save(&dir, &[profile("serv", "1.1.1.1"), profile("serv", "2.2.2.2")]).unwrap();
+        save(
+            &dir,
+            &[profile("serv", "1.1.1.1"), profile("serv", "2.2.2.2")],
+        )
+        .unwrap();
 
         let text = fs::read_to_string(path_for(&dir)).unwrap();
         assert!(text.contains("Host serv\n"), "{text}");
@@ -523,7 +549,11 @@ mod tests {
         // list `serv` a second time as a host merely defined in the config.
         let hosts = crate::sshconfig::parse_config(&dir.join("config")).unwrap();
         let aliases: Vec<&str> = hosts.iter().map(|h| h.alias.as_str()).collect();
-        assert_eq!(aliases, ["mine"], "easySSH's own hosts must not be re-listed");
+        assert_eq!(
+            aliases,
+            ["mine"],
+            "easySSH's own hosts must not be re-listed"
+        );
     }
 
     #[test]
@@ -538,4 +568,3 @@ mod tests {
         assert!(!text.contains("from-config"), "{text}");
     }
 }
-

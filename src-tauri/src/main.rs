@@ -243,7 +243,10 @@ fn load_connections(settings: &model::Settings) -> Vec<Profile> {
             }
         }
         if let Err(e) = ezconfig::save(&dir, &profiles) {
-            eprintln!("easySSH: could not write {}: {e}", ezconfig::path_for(&dir).display());
+            eprintln!(
+                "easySSH: could not write {}: {e}",
+                ezconfig::path_for(&dir).display()
+            );
         }
     }
     profiles
