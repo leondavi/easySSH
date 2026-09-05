@@ -391,11 +391,23 @@ function renderDetail() {
 
 /** How a key reads in a picker: `ec2.pem — RSA · PEM (passphrase)`.
  *  The format is named only when it is not the OpenSSH one, so the common
- *  case stays quiet and a `.pem` from AWS is recognisable at a glance. */
+ *  case stays quiet and a `.pem` from AWS is recognisable at a glance.
+ *  A key whose permissions the system `ssh` would refuse is marked, because
+ *  that failure otherwise only shows up later, in the terminal. */
 function keyLabel(k) {
   const detail = [k.algorithm, k.format && k.format !== "OpenSSH" ? k.format : null]
     .filter(Boolean).join(" · ");
-  return `${k.name}${detail ? ` — ${detail}` : ""}${k.encrypted ? " (passphrase)" : ""}`;
+  return `${k.name}${detail ? ` — ${detail}` : ""}${k.encrypted ? " (passphrase)" : ""}` +
+         `${k.permissions_open ? "  ⚠ permissions too open" : ""}`;
+}
+
+/** Tighten a key to 0600 and refresh everything showing it. Used by the two
+ *  places that warn about one, so the user never has to reach for chmod. */
+async function fixKeyPermissions(path) {
+  const key = await invoke("fix_key_permissions", { path });
+  await reloadKeys();
+  toast(`${key.name} is now 0600 — the terminal will accept it.`, "success");
+  return key;
 }
 
 /** EC2 instances get names like ec2-13-51-2-3.eu-north-1.compute.amazonaws.com. */
@@ -433,7 +445,23 @@ function renderKeyPicker(p) {
   sel.value = p.key_path || "";
 
   const key = options.find((k) => k.path === sel.value);
-  $("key-hint").textContent = key
+  const hint = $("key-hint");
+  if (key?.permissions_open) {
+    // easySSH connects through its own SSH client, which does not care about
+    // mode bits; the terminal shells out to the system ssh, which refuses the
+    // key outright. Say which one is about to break, and fix it from here.
+    hint.replaceChildren(
+      h("span", { class: "warn", text:
+        `${key.name} is readable by other users. easySSH can still connect, but the ` +
+        `terminal's ssh will refuse it.` }),
+      " ",
+      h("button", { class: "btn btn-plain btn-small", text: "Fix permissions",
+        onclick: async () => {
+          try { await fixKeyPermissions(key.path); renderDetail(); } catch (e) { fail(e); }
+        } }));
+    return;
+  }
+  hint.textContent = key
     ? [key.path, key.fingerprint].filter(Boolean).join("  ·  ")
     : "Choose a key, browse to one, or generate a new pair.";
 }
@@ -1075,7 +1103,31 @@ function profileSheet(existing) {
         keySel.append(h("option", { value: info.path, text: keyLabel(info) }));
       }
       keySel.value = info.path;
+      syncKeyWarn();
     };
+
+    // A key already in ~/.ssh can be one the system ssh will not touch — moved
+    // in by hand, restored from a backup. Warn before the connection is made
+    // rather than after, when the error would come from ssh instead of us.
+    const keyWarn = h("p", { class: "sheet-hint", hidden: true });
+    const syncKeyWarn = () => {
+      const k = state.keys.find((x) => x.path === keySel.value);
+      keyWarn.hidden = !k?.permissions_open;
+      if (keyWarn.hidden) return;
+      keyWarn.replaceChildren(
+        h("span", { class: "warn", text:
+          `${k.name} is readable by other users, and the terminal's ssh refuses such a key.` }),
+        " ",
+        h("button", { class: "btn btn-plain btn-small", text: "Fix permissions",
+          onclick: async () => {
+            try {
+              const fixed = await fixKeyPermissions(k.path);
+              useKey(fixed);
+              syncKeyWarn();
+            } catch (e) { fail(e); }
+          } }));
+    };
+    keySel.addEventListener("change", syncKeyWarn);
 
     const keyRow = h("div", { class: "sheet-field" },
       h("label", { text: "Key" }),
@@ -1094,7 +1146,11 @@ function profileSheet(existing) {
             useKey(info);
           }) })));
 
-    const syncAuth = () => { keyRow.hidden = authSel.value !== "key"; };
+    const syncAuth = () => {
+      keyRow.hidden = authSel.value !== "key";
+      if (keyRow.hidden) keyWarn.hidden = true;
+      else syncKeyWarn();
+    };
 
     // An EC2 instance has no password login at all: the key pair chosen when
     // it was launched is the only way in, and its user name comes from the AMI
@@ -1150,6 +1206,7 @@ function profileSheet(existing) {
       awsHint,
       ...field("Sign in with", authSel),
       keyRow,
+      keyWarn,
       err,
       h("div", { class: "sheet-actions" },
         h("button", { class: "btn", text: "Cancel", onclick: close }), go));
@@ -1474,6 +1531,15 @@ listen("probe-status", (e) => {
 });
 
 listen("tunnel-error", (e) => fail(e.payload.error));
+
+/* easySSH tightened — or could not tighten — a key on the way to using it.
+   Said out loud because it is a change to a file the user owns. */
+listen("key-notice", async (e) => {
+  await reloadKeys();
+  renderDetail();
+  toast(e.payload.message, e.payload.fixed ? "success" : "error", 9000);
+});
+listen("keys-changed", () => reloadKeys());
 listen("profiles-changed", () => reloadProfiles());
 listen("ssh-location-changed", async () => { await reloadConfigHosts(); renderDetail(); });
 

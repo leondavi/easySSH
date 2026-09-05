@@ -267,6 +267,7 @@ fn main() {
             commands::list_keys,
             commands::generate_key,
             commands::use_key_file,
+            commands::fix_key_permissions,
             commands::public_key_text,
             commands::connect,
             commands::disconnect,

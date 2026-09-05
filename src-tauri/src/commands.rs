@@ -9,8 +9,8 @@ use tauri::{AppHandle, Emitter, State};
 use tokio::sync::Mutex;
 
 use crate::model::{
-    AuthMethod, CommandResult, KeyChoice, KeyInfo, KnownHost, KnownHostRef, ProbeStatus, Profile,
-    SessionStatus, SetupResult, SshHostEntry, SshLocation, Tunnel,
+    AuthMethod, CommandResult, KeyChoice, KeyInfo, KeyNotice, KnownHost, KnownHostRef, ProbeStatus,
+    Profile, SessionStatus, SetupResult, SshHostEntry, SshLocation, Tunnel,
 };
 use crate::state::{AppState, LiveSession};
 use crate::{keys, knownhosts, ssh, sshconfig, store, terminal, tunnels};
@@ -164,6 +164,42 @@ pub async fn use_key_file(state: State<'_, AppState>, path: String) -> Result<Ke
     })
 }
 
+/// Put a key's permissions right on the way to using it, and say so.
+///
+/// Every route to using a key goes through here — connecting, installing the
+/// key on a server, opening a terminal — because a key easySSH once tightened
+/// can go loose again at any time: dragged into `~/.ssh` in the Finder,
+/// restored from a backup, unzipped, copied off another machine. easySSH's own
+/// connection would still work, and only the terminal would break, with an
+/// error from `ssh` that names a mode the user never chose.
+///
+/// Never fails a connection: a key we could not tighten is still a key russh
+/// can use, so the user is told and the attempt goes ahead.
+fn tidy_key(app: &AppHandle, path: &str) {
+    let notice = match keys::fix_permissions(Path::new(path)) {
+        Ok(None) => return,
+        Ok(Some(message)) => KeyNotice {
+            path: path.to_string(),
+            message,
+            fixed: true,
+        },
+        Err(e) => KeyNotice {
+            path: path.to_string(),
+            message: format!("{e}"),
+            fixed: false,
+        },
+    };
+    let _ = app.emit("key-notice", notice);
+}
+
+/// Tighten a key the user was warned about in the picker.
+#[tauri::command]
+pub async fn fix_key_permissions(app: AppHandle, path: String) -> Result<KeyInfo, String> {
+    keys::fix_permissions(Path::new(&path)).map_err(anyhow_err)?;
+    let _ = app.emit("keys-changed", ());
+    keys::inspect_path(&path).map_err(anyhow_err)
+}
+
 /// The `ssh-rsa AAAA... comment` line for a key, so the user can copy it.
 #[tauri::command]
 pub async fn public_key_text(path: String) -> Result<String, String> {
@@ -190,6 +226,12 @@ pub async fn connect(
             .clone();
         (profile, knownhosts::path_for(&inner.ssh_dir()))
     };
+
+    if profile.auth == AuthMethod::Key {
+        if let Some(path) = profile.key_path.as_deref() {
+            tidy_key(&app, path);
+        }
+    }
 
     let session = ssh::connect_profile(&profile, secret.as_deref(), &known_hosts)
         .await
@@ -344,6 +386,7 @@ pub async fn setup_key_auth(
             keys::ensure_default_key(&dir).map_err(anyhow_err)?
         }
     };
+    tidy_key(&app, &key.path);
     let public_key = keys::authorized_keys_line(Path::new(&key.path)).map_err(anyhow_err)?;
 
     let session = ssh::connect_password(
@@ -485,6 +528,7 @@ pub async fn stop_tunnel(
 
 #[tauri::command]
 pub async fn open_terminal(
+    app: AppHandle,
     state: State<'_, AppState>,
     profile_id: String,
     include_tunnels: bool,
@@ -496,6 +540,13 @@ pub async fn open_terminal(
             .ok_or("that connection no longer exists")?
             .clone()
     };
+    // The system ssh is about to take over, and unlike russh it refuses a key
+    // anyone else can read. This is the moment that matters most.
+    if profile.auth == AuthMethod::Key {
+        if let Some(path) = profile.key_path.as_deref() {
+            tidy_key(&app, path);
+        }
+    }
     terminal::open(&profile, include_tunnels).map_err(anyhow_err)
 }
 

@@ -1,6 +1,6 @@
 # Build easySSH installers for macOS, Windows and Linux from a single tag.
 #
-#   git tag v1.0.0 && git push origin v1.0.0
+#   git tag v1.5.0 && git push origin v1.5.0
 #
 # Produces a draft release holding the .dmg (Apple Silicon + Intel), the
 # Windows .exe and .msi, and a .deb for Debian and Ubuntu. Review it, then

@@ -843,6 +843,9 @@ input, select, textarea { user-select: text; }
   white-space: nowrap;
 }
 .tag.warn   { background: color-mix(in srgb, var(--orange) 18%, transparent); color: var(--orange); }
+
+/* A warning said in place, next to the thing it is about. */
+.warn { color: var(--orange); }
 .tag.danger { background: color-mix(in srgb, var(--red) 18%, transparent); color: var(--red); }
 
 .sheet-wide { width: min(600px, calc(100vw - 60px)); }

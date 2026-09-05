@@ -145,6 +145,11 @@ pub struct KeyInfo {
     /// `OpenSSH`, `PEM` or `PuTTY` — how the file is encoded. Shown because a
     /// `.pem` from AWS looks nothing like the key `ssh-keygen` writes.
     pub format: String,
+    /// True when the file's permissions are looser than 0600, which the system
+    /// `ssh` refuses outright. easySSH's own connection does not care, so this
+    /// is the difference between a key that works here and one that also works
+    /// in the terminal.
+    pub permissions_open: bool,
 }
 
 /// A key the user picked in the file dialog, once easySSH has worked out what
@@ -156,6 +161,16 @@ pub struct KeyChoice {
     /// `.ssh` directory, the private half found beside the public one. Empty
     /// when the file was usable exactly as it was.
     pub note: String,
+}
+
+/// Something easySSH quietly put right about a key on the way to using it.
+#[derive(Debug, Clone, Serialize)]
+pub struct KeyNotice {
+    pub path: String,
+    /// A sentence for the UI: what was fixed, or what the user has to do.
+    pub message: String,
+    /// False when the key is still one the system `ssh` will refuse.
+    pub fixed: bool,
 }
 
 /// A place on this machine where SSH configuration and keys live.

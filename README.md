@@ -28,6 +28,7 @@ easySSH does all of that from one window.
 | Editing `~/.ssh/config` by hand | Click **Add to Config** |
 | `vim ~/.ssh/known_hosts` after a server rebuild | Select the entry, click **Remove** |
 | `chmod 600 aws-key.pem` and `ssh -i … ec2-user@…` | **Browse…** to the `.pem`, click **Connect** |
+| `chmod 600 ~/.ssh/that-key` after ssh refuses it | easySSH marks it and fixes it for you |
 
 ---
 
@@ -226,6 +227,24 @@ out the things that are easy to get wrong:
 
 A passphrase-protected PEM is listed even though nothing about it can be read
 until you type the passphrase.
+
+**A key that goes loose later is caught too.** Browse… is not the only way a key
+arrives in `~/.ssh`: they get dragged in from the Finder, restored from backups,
+unzipped, copied off another machine — and they keep the permissions they had.
+easySSH connects through its own SSH client, which does not look at mode bits at
+all, so such a key works here and then fails in the terminal, with an error that
+comes from `ssh` rather than from easySSH:
+
+```
+WARNING: UNPROTECTED PRIVATE KEY FILE!
+Permissions 0644 for '/Users/you/.ssh/cells-app.pem' are too open.
+This private key will be ignored.
+```
+
+So the key picker marks any key `ssh` would refuse and offers **Fix
+permissions** beside it, and every route that leads to a key actually being used
+— connecting, installing it on a server, opening a terminal — tightens it to
+`0600` first and says what it did. You should never have to reach for `chmod`.
 
 **Known hosts.** The shield icon opens an editor for `known_hosts`, showing each
 entry's host, algorithm, fingerprint, and which of your connections depend on

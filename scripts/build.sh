@@ -79,17 +79,63 @@ build_macos() {
   rm -f "$BUNDLE_DIR"/macos/rw.*.dmg "$BUNDLE_DIR"/dmg/rw.*.dmg 2>/dev/null || true
 
   say "Bundling .app and .dmg"
-  cargo tauri build "${args[@]}"
+  local bundle_status=0
+  cargo tauri build "${args[@]}" || bundle_status=$?
+
+  local app
+  app="$(find "$BUNDLE_DIR/macos" -maxdepth 1 -name '*.app' -print -quit 2>/dev/null || true)"
+  [[ -n "$app" ]] || die "the build produced no .app"
 
   # Ad-hoc sign so Gatekeeper does not refuse to launch a locally built app.
   # A real release needs a Developer ID certificate and notarisation; see README.
-  local app
-  app="$(find "$BUNDLE_DIR/macos" -maxdepth 1 -name '*.app' -print -quit 2>/dev/null || true)"
-  if [[ -n "$app" && -z "${APPLE_SIGNING_IDENTITY:-}" ]]; then
+  if [[ -z "${APPLE_SIGNING_IDENTITY:-}" ]]; then
     say "Ad-hoc signing $(basename "$app")"
     codesign --force --deep --sign - "$app" 2>/dev/null \
       || warn "ad-hoc signing failed; the .app may need a right-click → Open on first launch"
   fi
+
+  # The .app is built and signed by now; only the disk image can still be
+  # missing. Tauri's bundle_dmg.sh styles the volume through the Finder and
+  # then unmounts it, and the Finder does not always let go in time —
+  # "Resource busy", and the whole build reports failure over a step that has
+  # nothing to do with the application. Make the image ourselves instead, from
+  # the signed .app, which needs no Finder and no mounted volume at all.
+  local dmg
+  dmg="$(find "$BUNDLE_DIR/dmg" -maxdepth 1 -name '*.dmg' ! -name 'rw.*.dmg' -print -quit 2>/dev/null || true)"
+  if [[ -z "$dmg" ]]; then
+    (( bundle_status == 0 )) || warn "the bundler could not finish the .dmg; building it directly"
+    make_dmg "$app" || die "could not build the .dmg"
+  elif (( bundle_status != 0 )); then
+    die "cargo tauri build failed"
+  fi
+}
+
+# Build a .dmg from a finished .app: the application and the customary link to
+# /Applications, compressed in one pass. Plain by design — no background image
+# and no window layout, because those are what need the Finder.
+make_dmg() {
+  local app="$1"
+  local name version arch staging out
+  name="$(basename "$app" .app)"
+  version="$(sed -n 's/.*"version"[[:space:]]*:[[:space:]]*"\([^"]*\)".*/\1/p' src-tauri/tauri.conf.json | head -1)"
+  # Name the file the way the bundler would have, so a recovered image is not
+  # something the release notes have to explain: arm64 is aarch64 here.
+  arch="$(uname -m)"; [[ "$arch" == "arm64" ]] && arch="aarch64"
+  out="$BUNDLE_DIR/dmg/${name}_${version:-0.0.0}_${arch}.dmg"
+
+  # A previous run's scratch images and volumes would be picked up as the app
+  # to copy, or hold the name we are about to write.
+  rm -f "$BUNDLE_DIR"/macos/rw.*.dmg "$BUNDLE_DIR"/dmg/rw.*.dmg "$out" 2>/dev/null || true
+
+  staging="$(mktemp -d)"
+  trap 'rm -rf "$staging"' RETURN
+  cp -R "$app" "$staging/"
+  ln -s /Applications "$staging/Applications"
+
+  mkdir -p "$BUNDLE_DIR/dmg"
+  say "Building $(basename "$out")"
+  hdiutil create -quiet -srcfolder "$staging" -volname "$name" \
+    -fs HFS+ -format UDZO -imagekey zlib-level=9 "$out"
 }
 
 # Debian and Ubuntu. The bundler needs the WebKit and GTK development packages,

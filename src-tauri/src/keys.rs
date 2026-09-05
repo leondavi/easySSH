@@ -257,6 +257,7 @@ pub fn inspect(path: &Path) -> Option<KeyInfo> {
                 comment: public.comment().to_string(),
                 encrypted: key.is_encrypted(),
                 format: format.to_string(),
+                permissions_open: permissions_are_too_open(path),
             })
         }
         // A passphrase-protected PEM is a perfectly good key; we simply cannot
@@ -270,6 +271,7 @@ pub fn inspect(path: &Path) -> Option<KeyInfo> {
             comment: String::new(),
             encrypted: true,
             format: format.to_string(),
+            permissions_open: permissions_are_too_open(path),
         }),
         Err(_) => None,
     }
@@ -434,7 +436,7 @@ fn write_public_key_beside(private_path: &Path, text: &str) {
 /// the state a `.pem` arrives in from a browser download — and the state the
 /// system `ssh` refuses outright.
 #[cfg(unix)]
-fn permissions_are_too_open(path: &Path) -> bool {
+pub fn permissions_are_too_open(path: &Path) -> bool {
     use std::os::unix::fs::PermissionsExt;
     fs::metadata(path)
         .map(|m| m.permissions().mode() & 0o077 != 0)
@@ -443,8 +445,37 @@ fn permissions_are_too_open(path: &Path) -> bool {
 
 /// Windows has no mode bits to read; `harden_file` rewrites the ACL either way.
 #[cfg(not(unix))]
-fn permissions_are_too_open(_path: &Path) -> bool {
+pub fn permissions_are_too_open(_path: &Path) -> bool {
     false
+}
+
+/// Tighten a key the system `ssh` would refuse to load, and say what was done.
+///
+/// easySSH connects through russh, which does not look at mode bits at all, so
+/// a world-readable key works perfectly inside the app and then fails the
+/// moment the user opens a real terminal — the one place the error is hardest
+/// to act on, because it comes from `ssh` rather than from us. Fixing it
+/// wherever a key is about to be used is what keeps that difference from ever
+/// becoming the user's problem.
+///
+/// Returns `None` when there was nothing to do, which is the common case.
+pub fn fix_permissions(path: &Path) -> Result<Option<String>> {
+    if !path.is_file() || !permissions_are_too_open(path) {
+        return Ok(None);
+    }
+    harden_file(path).with_context(|| format!("tightening {}", path.display()))?;
+    if permissions_are_too_open(path) {
+        return Err(anyhow!(
+            "{} is still readable by others and the system ssh will refuse it. \
+             Fix it with: chmod 600 {}",
+            path.display(),
+            path.display()
+        ));
+    }
+    Ok(Some(format!(
+        "Tightened {} to 0600 — ssh refuses a key that anyone else can read.",
+        file_name_of(path)
+    )))
 }
 
 /// What we settled on for a key the user picked, and what we had to do to it.
@@ -803,6 +834,59 @@ QR18hXmAgGehm1QMMYGF34PAtBpTj+8/ZPFx2zZxir7pzDpfYoNAIf/fzLsW1ruG
         }
         assert_eq!(chosen.key.algorithm, "RSA");
         assert_eq!(chosen.key.format, "PEM");
+    }
+
+    /// The case that sends people to the terminal to run chmod: a key that is
+    /// already in `.ssh` — put there by hand, or restored from a backup — and
+    /// loose enough that the system `ssh` will not read it. easySSH's own
+    /// connection would work, so nothing warns until the terminal fails.
+    #[test]
+    #[cfg(unix)]
+    fn a_loose_key_in_the_ssh_dir_is_flagged_and_can_be_fixed() {
+        use std::os::unix::fs::PermissionsExt;
+
+        let ssh_dir = tmpdir("loose");
+        let key = ssh_dir.join("cells-app.pem");
+        fs::write(&key, PEM_RSA).unwrap();
+        fs::set_permissions(&key, fs::Permissions::from_mode(0o644)).unwrap();
+
+        let listed = list_keys_in(&ssh_dir).unwrap();
+        assert_eq!(listed.len(), 1);
+        assert!(
+            listed[0].permissions_open,
+            "a key ssh would refuse must say so before anyone tries to connect"
+        );
+
+        let note = fix_permissions(&key)
+            .expect("0644 is fixable")
+            .expect("something to do");
+        assert!(note.contains("0600"), "unhelpful note: {note}");
+        assert_eq!(
+            fs::metadata(&key).unwrap().permissions().mode() & 0o777,
+            0o600
+        );
+
+        // Nothing to report the second time: the fix is not an event that keeps
+        // happening every time a key is used.
+        assert!(fix_permissions(&key).unwrap().is_none());
+        assert!(!list_keys_in(&ssh_dir).unwrap()[0].permissions_open);
+    }
+
+    /// A group-readable key is refused by ssh just as a world-readable one is,
+    /// and a file that is not there at all is not an error worth raising.
+    #[test]
+    #[cfg(unix)]
+    fn group_read_is_too_open_and_a_missing_key_is_not_an_error() {
+        use std::os::unix::fs::PermissionsExt;
+
+        let dir = tmpdir("loose-group");
+        let key = dir.join("id_rsa");
+        fs::write(&key, PEM_RSA).unwrap();
+        fs::set_permissions(&key, fs::Permissions::from_mode(0o640)).unwrap();
+        assert!(permissions_are_too_open(&key));
+        assert!(fix_permissions(&key).unwrap().is_some());
+
+        assert!(fix_permissions(&dir.join("not-here")).unwrap().is_none());
     }
 
     #[test]
