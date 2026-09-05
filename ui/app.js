@@ -389,13 +389,36 @@ function renderDetail() {
   refreshTerminalPreview(p);
 }
 
+/** How a key reads in a picker: `ec2.pem — RSA · PEM (passphrase)`.
+ *  The format is named only when it is not the OpenSSH one, so the common
+ *  case stays quiet and a `.pem` from AWS is recognisable at a glance. */
+function keyLabel(k) {
+  const detail = [k.algorithm, k.format && k.format !== "OpenSSH" ? k.format : null]
+    .filter(Boolean).join(" · ");
+  return `${k.name}${detail ? ` — ${detail}` : ""}${k.encrypted ? " (passphrase)" : ""}`;
+}
+
+/** EC2 instances get names like ec2-13-51-2-3.eu-north-1.compute.amazonaws.com. */
+const AWS_HOST = /(^|\.)compute(-\d+)?\.amazonaws\.com$/i;
+
+/** Copy a private key — typically the .pem the AWS console downloads — into
+ *  the active .ssh directory, at the permissions ssh insists on, with a .pub
+ *  beside it. Returns null if the user cancelled the dialog. */
+async function importKeyFile() {
+  const path = await invoke("pick_key_file", { title: "Choose a .pem or private key to import" });
+  if (!path) return null;
+  const info = await invoke("import_key_file", { path });
+  await reloadKeys();
+  return info;
+}
+
 function renderKeyPicker(p) {
   const sel = $("key-select");
   const options = [...state.keys];
 
   // A key chosen from outside ~/.ssh still needs to appear in the list.
   if (p.key_path && !options.some((k) => k.path === p.key_path)) {
-    options.push({ path: p.key_path, name: basename(p.key_path), algorithm: "", fingerprint: "", encrypted: false });
+    options.push({ path: p.key_path, name: basename(p.key_path), algorithm: "", fingerprint: "", encrypted: false, format: "" });
   }
 
   sel.replaceChildren(
@@ -403,7 +426,7 @@ function renderKeyPicker(p) {
     ...options.map((k) => h("option", {
       value: k.path,
       selected: k.path === p.key_path,
-      text: k.algorithm ? `${k.name} — ${k.algorithm}${k.encrypted ? " (passphrase)" : ""}` : k.name,
+      text: k.algorithm ? keyLabel(k) : k.name,
     })));
   sel.value = p.key_path || "";
 
@@ -697,7 +720,7 @@ function setupSheet(p) {
       keySel.replaceChildren(...state.keys.map((k) => h("option", {
         value: k.path,
         selected: k.path === p.key_path,
-        text: `${k.name} — ${k.algorithm}${k.encrypted ? " (passphrase)" : ""}`,
+        text: keyLabel(k),
       })));
       if (p.key_path) keySel.value = p.key_path;
     };
@@ -1041,25 +1064,60 @@ function profileSheet(existing) {
       h("option", { value: "key", text: "Private key", selected: p.auth === "key" }));
 
     const keySel = h("select", {}, ...state.keys.map((k) => h("option", {
-      value: k.path, selected: k.path === p.key_path,
-      text: `${k.name} — ${k.algorithm}${k.encrypted ? " (passphrase)" : ""}`,
+      value: k.path, selected: k.path === p.key_path, text: keyLabel(k),
     })));
     if (!state.keys.length) keySel.append(h("option", { value: "", text: "No keys found" }));
 
+    const useKey = (info) => {
+      if (![...keySel.options].some((o) => o.value === info.path)) {
+        keySel.append(h("option", { value: info.path, text: keyLabel(info) }));
+      }
+      keySel.value = info.path;
+    };
+
     const keyRow = h("div", { class: "sheet-field" },
       h("label", { text: "Key" }),
-      h("div", { class: "grow", style: "display:flex;gap:6px" },
+      h("div", { class: "grow", style: "display:flex;flex-wrap:wrap;gap:6px" },
         keySel,
+        h("button", { class: "btn btn-small", text: "Import .pem…",
+          onclick: async () => {
+            try {
+              const info = await importKeyFile();
+              if (info) useKey(info);
+            } catch (e) { fail(e); }
+          } }),
         h("button", { class: "btn btn-small", text: "Generate…",
           onclick: () => generateKeySheet(async (info) => {
             await reloadKeys();
-            keySel.append(h("option", { value: info.path, text: `${info.name} — ${info.algorithm}` }));
-            keySel.value = info.path;
+            useKey(info);
           }) })));
 
     const syncAuth = () => { keyRow.hidden = authSel.value !== "key"; };
-    authSel.addEventListener("change", syncAuth);
+
+    // An EC2 instance has no password login at all: the key pair chosen when
+    // it was launched is the only way in, and its user name comes from the AMI
+    // rather than from anything we can see. So say so, and start them on the
+    // key — but never overrule a choice they have already made.
+    let authTouched = false;
+    const awsHint = h("p", { class: "sheet-hint", hidden: true, text:
+      "AWS EC2. The user name depends on the image: ec2-user (Amazon Linux), " +
+      "ubuntu (Ubuntu), admin (Debian), or centos / rocky / fedora / bitnami. " +
+      "Sign in with the .pem from the key pair you picked when launching the " +
+      "instance — Import .pem… copies it in with the permissions ssh requires." });
+    const syncAws = () => {
+      const isAws = AWS_HOST.test(hostIn.value.trim());
+      awsHint.hidden = !isAws;
+      if (!isAws) return;
+      if (!user.value.trim()) user.value = "ec2-user";
+      if (!existing && !authTouched && authSel.value !== "key") {
+        authSel.value = "key";
+        syncAuth();
+      }
+    };
+    hostIn.addEventListener("input", syncAws);
+    authSel.addEventListener("change", () => { authTouched = true; syncAuth(); });
     syncAuth();
+    syncAws();
 
     const err = h("div", { class: "sheet-error", hidden: true });
     const go = h("button", { class: "btn btn-primary", text: existing ? "Save" : "Add" });
@@ -1087,6 +1145,7 @@ function profileSheet(existing) {
       ...field("Host", hostIn),
       ...field("Port", port),
       ...field("User", user),
+      awsHint,
       ...field("Sign in with", authSel),
       keyRow,
       err,
@@ -1354,6 +1413,16 @@ $("auth-toggle").addEventListener("click", () => {
 });
 
 $("browse-key").addEventListener("click", browseForKey);
+$("import-key").addEventListener("click", async () => {
+  const p = selected();
+  if (!p) return;
+  try {
+    const info = await importKeyFile();
+    if (!info) return;
+    await saveProfile({ ...p, key_path: info.path, auth: "key" });
+    toast(`Imported ${info.name} into ${state.location?.dir ?? "your .ssh directory"}`, "success");
+  } catch (e) { fail(e); }
+});
 $("show-key").addEventListener("click", () => {
   const p = selected();
   if (!p?.key_path) { toast("Choose a key first"); return; }

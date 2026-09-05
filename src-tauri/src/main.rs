@@ -267,6 +267,7 @@ fn main() {
             commands::list_keys,
             commands::generate_key,
             commands::inspect_key,
+            commands::import_key_file,
             commands::public_key_text,
             commands::connect,
             commands::disconnect,

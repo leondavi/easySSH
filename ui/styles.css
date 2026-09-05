@@ -454,7 +454,11 @@ body {
   box-shadow: 0 0.5px 1.5px rgba(0,0,0,0.16);
 }
 
-.key-picker { display: flex; gap: 6px; align-items: center; flex: 1; min-width: 0; }
+/* Four buttons and a select: on a narrow window they wrap onto a second row
+   rather than squeezing the key name down to nothing. */
+.key-picker { display: flex; flex-wrap: wrap; gap: 6px; align-items: center; flex: 1; min-width: 0; }
+.key-picker select { flex: 1 1 150px; min-width: 0; }
+.key-picker .btn { flex: none; }
 
 select, input[type="text"], input[type="password"], input[type="number"] {
   height: 26px;

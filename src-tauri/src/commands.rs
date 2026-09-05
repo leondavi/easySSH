@@ -146,6 +146,15 @@ pub async fn generate_key(
     keys::generate(&dir, &name, &algorithm, &comment, passphrase.as_deref()).map_err(anyhow_err)
 }
 
+/// Copy a private key the user picked — typically a `.pem` downloaded from the
+/// AWS console — into the active `.ssh` directory, with owner-only permissions
+/// and a `.pub` beside it.
+#[tauri::command]
+pub async fn import_key_file(state: State<'_, AppState>, path: String) -> Result<KeyInfo, String> {
+    let dir = state.inner.lock().await.ssh_dir();
+    keys::import(&dir, Path::new(&path)).map_err(anyhow_err)
+}
+
 /// Validate a key the user picked with the file dialog.
 #[tauri::command]
 pub async fn inspect_key(path: String) -> Result<KeyInfo, String> {
@@ -688,10 +697,16 @@ pub async fn add_to_ssh_config(
 pub async fn pick_key_file(
     app: AppHandle,
     start_in: Option<String>,
+    title: Option<String>,
 ) -> Result<Option<String>, String> {
     use tauri_plugin_dialog::DialogExt;
 
-    let mut builder = app.dialog().file().set_title("Choose a private key");
+    // No extension filter: an OpenSSH key has no extension at all, and a
+    // filtered dialog would grey it out.
+    let mut builder = app
+        .dialog()
+        .file()
+        .set_title(title.unwrap_or_else(|| "Choose a private key".into()));
     if let Some(dir) = start_in.filter(|d| Path::new(d).is_dir()) {
         builder = builder.set_directory(dir);
     }

@@ -27,6 +27,7 @@ easySSH does all of that from one window.
 | `ssh -L 8080:localhost:3000 user@host` and remembering ports | Flip a switch, click **Open** |
 | Editing `~/.ssh/config` by hand | Click **Add to Config** |
 | `vim ~/.ssh/known_hosts` after a server rebuild | Select the entry, click **Remove** |
+| `chmod 600 aws-key.pem` and `ssh -i … ec2-user@…` | Click **Import .pem**, then **Connect** |
 
 ---
 
@@ -92,6 +93,38 @@ generate a failed authentication every five minutes forever, which is exactly
 the pattern fail2ban exists to ban. Background probes also refuse to trust a
 host that is not already in `known_hosts`, so easySSH never pins a host key
 without showing you the fingerprint first.
+
+---
+
+## Connecting to AWS EC2
+
+An EC2 instance has no password login at all: the key pair you chose when you
+launched it is the only way in. AWS gives you that key once, as a `.pem` in your
+downloads folder — world-readable, which is exactly the thing the system `ssh`
+refuses to touch.
+
+**Import .pem…**, beside the key picker, deals with all of it: the file is
+copied into your `.ssh` directory at `0600`, and the public half is derived and
+written to a `.pub` beside it, since a `.pem` arrives without one. From then on
+it behaves like any other key here — selectable for any connection, written as
+an `IdentityFile` into `ez_config`, and usable by `ssh` from any terminal.
+
+The rest is the host name and the user, and easySSH recognises an EC2 address:
+type one into **New Connection** and it switches to key authentication, fills
+in `ec2-user`, and lists the alternatives, because the user name comes from the
+image rather than from anything visible in the address:
+
+| Image | User |
+| --- | --- |
+| Amazon Linux | `ec2-user` |
+| Ubuntu | `ubuntu` |
+| Debian | `admin` |
+| CentOS / Rocky / Fedora | `centos`, `rocky`, `fedora` |
+| Bitnami | `bitnami` |
+
+There is no **Set Up…** step to run: AWS already put your public key in the
+instance's `authorized_keys`. Connect, and the tunnels and terminal work as they
+do for anything else.
 
 ---
 
@@ -171,6 +204,13 @@ owner-only permissions — `0600` on Unix, and inherited ACEs stripped on Window
 which is what OpenSSH there insists on. View or copy any public key from the key
 icon in the sidebar.
 
+**`.pem` files, and PuTTY's `.ppk`.** A key does not have to be in the format
+`ssh-keygen` writes. easySSH reads PEM — PKCS#1, PKCS#8 and their encrypted
+forms, which is what AWS gives you — and PuTTY's `.ppk`, so they appear in the
+key picker beside everything else, with the format named next to the algorithm.
+A passphrase-protected PEM is listed even though nothing about it can be read
+until you type the passphrase.
+
 **Known hosts.** The shield icon opens an editor for `known_hosts`, showing each
 entry's host, algorithm, fingerprint, and which of your connections depend on
 it. `@revoked` and `@cert-authority` markers and hashed entries are called out;
@@ -249,7 +289,7 @@ add them as repository secrets for the release workflow.
 
 ```bash
 cd src-tauri
-cargo test           # 41 tests, including a real SSH server harness
+cargo test           # 54 tests, including a real SSH server harness
 cargo clippy --all-targets -- -D warnings
 cargo fmt
 ```

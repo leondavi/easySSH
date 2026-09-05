@@ -142,6 +142,9 @@ pub struct KeyInfo {
     pub fingerprint: String,
     pub comment: String,
     pub encrypted: bool,
+    /// `OpenSSH`, `PEM` or `PuTTY` — how the file is encoded. Shown because a
+    /// `.pem` from AWS looks nothing like the key `ssh-keygen` writes.
+    pub format: String,
 }
 
 /// A place on this machine where SSH configuration and keys live.
