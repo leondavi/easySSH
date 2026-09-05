@@ -65,9 +65,12 @@ build_macos() {
   # An interrupted bundle_dmg.sh leaves a read-write scratch image behind, and
   # often still mounted. The next run then fails outright, because the image is
   # busy, so detach anything backed by one of ours before clearing them.
+  # `hdiutil info` prints the device on a line of its own, but with the
+  # partition scheme tabbed after it — matching the whole line finds nothing,
+  # which is how these leftovers used to survive and break the next build.
   hdiutil info 2>/dev/null | awk -v proj="$ROOT" '
     /^image-path/ { img=$0; sub(/^image-path[ \t]*:[ \t]*/, "", img) }
-    /^\/dev\/disk[0-9]+$/ { if (index(img, proj) && index(img, "rw.")) print $1 }
+    $1 ~ /^\/dev\/disk[0-9]+$/ { if (index(img, proj) && index(img, "rw.")) print $1 }
   ' | while read -r dev; do
     warn "detaching leftover disk image $dev"
     hdiutil detach "$dev" -force >/dev/null 2>&1 || true
