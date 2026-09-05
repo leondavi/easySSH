@@ -7,7 +7,7 @@
 easySSH sets up key-based login for you, opens a real terminal already
 connected, and brings the server's web apps to your browser.
 
-macOS · Windows · built in Rust
+macOS · Windows · Debian/Ubuntu · built in Rust
 
 </div>
 
@@ -27,15 +27,16 @@ easySSH does all of that from one window.
 | `ssh -L 8080:localhost:3000 user@host` and remembering ports | Flip a switch, click **Open** |
 | Editing `~/.ssh/config` by hand | Click **Add to Config** |
 | `vim ~/.ssh/known_hosts` after a server rebuild | Select the entry, click **Remove** |
-| `chmod 600 aws-key.pem` and `ssh -i … ec2-user@…` | Click **Import .pem**, then **Connect** |
+| `chmod 600 aws-key.pem` and `ssh -i … ec2-user@…` | **Browse…** to the `.pem`, click **Connect** |
 
 ---
 
 ## Quick start
 
 **1 · Install.** Grab the installer for your platform from
-[Releases](../../releases) — `.dmg` for macOS, `.exe` or `.msi` for Windows.
-Or [build it yourself](#building-from-source) in one command.
+[Releases](../../releases) — `.dmg` for macOS, `.exe` or `.msi` for Windows,
+`.deb` for Debian and Ubuntu. Or [build it yourself](#building-from-source) in
+one command.
 
 > On macOS, an unsigned build needs a right-click → **Open** the first time.
 > That is Gatekeeper doing its job on software without an Apple certificate.
@@ -59,8 +60,9 @@ you try to connect.
 
 **4 · Connect.** Click **Connect**. From here you can:
 
-- **Terminal** — opens iTerm or Terminal.app (macOS) or Windows Terminal, with
-  the session already live. Your shell, your colours, your scrollback, your tmux.
+- **Terminal** — opens iTerm or Terminal.app (macOS), Windows Terminal, or
+  your `x-terminal-emulator` (Debian/Ubuntu), with the session already live.
+  Your shell, your colours, your scrollback, your tmux.
 - **Web tunnels** — add one, flip it on, click **Open**. The server's dashboard
   appears in your browser as though it were running locally.
 - **Run a command** — a quick one-off without leaving the app. Shows stdout,
@@ -103,11 +105,13 @@ launched it is the only way in. AWS gives you that key once, as a `.pem` in your
 downloads folder — world-readable, which is exactly the thing the system `ssh`
 refuses to touch.
 
-**Import .pem…**, beside the key picker, deals with all of it: the file is
-copied into your `.ssh` directory at `0600`, and the public half is derived and
-written to a `.pub` beside it, since a `.pem` arrives without one. From then on
-it behaves like any other key here — selectable for any connection, written as
-an `IdentityFile` into `ez_config`, and usable by `ssh` from any terminal.
+**Browse…**, beside the key picker, deals with all of it. Point it at the file
+you downloaded and easySSH works out what it is: a world-readable `.pem` is
+copied into your `.ssh` directory at `0600` — the permissions the system `ssh`
+insists on — and the public half, which a `.pem` arrives without, is derived
+and written to a `.pub` beside it. From then on it behaves like any other key
+here: selectable for any connection, written as an `IdentityFile` into
+`ez_config`, and usable by `ssh` from any terminal.
 
 The rest is the host name and the user, and easySSH recognises an EC2 address:
 type one into **New Connection** and it switches to key authentication, fills
@@ -204,10 +208,22 @@ owner-only permissions — `0600` on Unix, and inherited ACEs stripped on Window
 which is what OpenSSH there insists on. View or copy any public key from the key
 icon in the sidebar.
 
-**`.pem` files, and PuTTY's `.ppk`.** A key does not have to be in the format
-`ssh-keygen` writes. easySSH reads PEM — PKCS#1, PKCS#8 and their encrypted
-forms, which is what AWS gives you — and PuTTY's `.ppk`, so they appear in the
-key picker beside everything else, with the format named next to the algorithm.
+**Browse… figures out what you picked.** A key does not have to be in the
+format `ssh-keygen` writes: easySSH reads PEM — PKCS#1, PKCS#8 and their
+encrypted forms, which is what AWS gives you — and PuTTY's `.ppk`, and lists
+them in the picker with the format named beside the algorithm. It also sorts
+out the things that are easy to get wrong:
+
+- **Picked the public half?** `id_ed25519.pub` resolves to `id_ed25519` beside
+  it. A `.pub` with no private key next to it says so, rather than failing later
+  at connect time.
+- **Permissions ssh would refuse** are tightened to `0600` where the key lies,
+  or, for a key outside your `.ssh` directory — a fresh download — the key is
+  copied in at `0600` and that copy is used. Keys already private are left
+  exactly where you keep them.
+- **No `.pub` beside it?** One is derived, so the key can be installed on other
+  servers and shown in the public key viewer.
+
 A passphrase-protected PEM is listed even though nothing about it can be read
 until you type the passphrase.
 
@@ -237,8 +253,8 @@ removal is refused outright if the file changed since the list was loaded.
 
 Connections live in `ez_config` in your `.ssh` directory, 0600 like everything
 else there. Only app settings — which `.ssh` directory is in focus — stay in
-`~/Library/Application Support/easySSH/` on macOS and `%APPDATA%\easySSH\` on
-Windows. Connections saved by earlier versions are moved out of `profiles.json`
+`~/Library/Application Support/easySSH/` on macOS, `%APPDATA%\easySSH\` on
+Windows and `~/.config/easySSH/` on Linux. Connections saved by earlier versions are moved out of `profiles.json`
 into `ez_config` the first time you run this one.
 
 ---
@@ -253,8 +269,20 @@ cd easySSH
 
 ./scripts/build.sh              # bundle for the machine you are on
 ./scripts/build.sh macos        # .dmg + .app
+./scripts/build.sh linux        # .deb, on Debian or Ubuntu
 ./scripts/build.sh --universal  # one .dmg for Apple Silicon and Intel
 ```
+
+On Debian or Ubuntu the bundler needs the system web view's development
+packages — easySSH draws in WebKitGTK rather than shipping a browser:
+
+```bash
+sudo apt-get install -y libwebkit2gtk-4.1-dev libgtk-3-dev librsvg2-dev \
+  libssl-dev libayatana-appindicator3-dev patchelf build-essential
+```
+
+`build.sh linux` checks for these and names the missing ones rather than
+letting the linker fail three minutes in.
 
 On Windows, in PowerShell:
 
@@ -266,9 +294,12 @@ On Windows, in PowerShell:
 Installers land in `src-tauri/target/release/bundle/`.
 
 **Each platform's installer must be built on that platform.** A `.dmg` needs
-Apple's tooling and `.exe`/`.msi` need NSIS and WiX. To get both at once, push a
-tag — `.github/workflows/release.yml` builds macOS (both architectures) and
-Windows and collects them into a draft release.
+Apple's tooling, `.exe`/`.msi` need NSIS and WiX, and a `.deb` needs the GTK
+and WebKit libraries it links against. To get all of them at once, push a tag —
+`.github/workflows/release.yml` builds macOS (both architectures), Windows and
+Debian/Ubuntu and collects them into a draft release. The `.deb` is built on
+Ubuntu 22.04, since a package links against the glibc it was built on and the
+oldest supported release is the one that installs everywhere.
 
 For development:
 
@@ -289,14 +320,14 @@ add them as repository secrets for the release workflow.
 
 ```bash
 cd src-tauri
-cargo test           # 54 tests, including a real SSH server harness
+cargo test           # 59 tests, including a real SSH server harness
 cargo clippy --all-targets -- -D warnings
 cargo fmt
 ```
 
-CI runs tests on macOS and Windows, checks the UI wiring, and **builds the
-Windows installers on every push** — the Windows code paths cannot be compiled
-on a Mac, so that job is what proves they work.
+CI runs tests on macOS, Windows and Ubuntu, checks the UI wiring, and **builds
+the Windows installers and the Linux `.deb` on every push** — those platforms'
+code paths cannot be compiled on a Mac, so those jobs are what prove they work.
 
 `testserver.rs` is a real SSH server used by the tests, so the parts that matter
 most are exercised rather than merely read: authenticating, forwarding a port

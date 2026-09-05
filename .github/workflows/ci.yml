@@ -1,8 +1,9 @@
 # Runs on every push and pull request.
 #
-# The point of the Windows jobs is that easySSH is developed on a Mac: the
-# Windows code paths (terminal launching, key ACLs, installer bundling) cannot
-# be compiled or run there, so CI is the only thing that proves they work.
+# The point of the Windows and Linux jobs is that easySSH is developed on a
+# Mac: the code paths those platforms take (terminal launching, key ACLs,
+# installer bundling) cannot be compiled or run there, so CI is the only thing
+# that proves they work.
 
 name: CI
 
@@ -26,7 +27,7 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        os: [macos-latest, windows-latest]
+        os: [macos-latest, windows-latest, ubuntu-latest]
     runs-on: ${{ matrix.os }}
     steps:
       - uses: actions/checkout@v4
@@ -34,6 +35,15 @@ jobs:
       - uses: dtolnay/rust-toolchain@stable
         with:
           components: clippy, rustfmt
+
+      # Tauri draws in the system web view, so even `cargo test` needs the
+      # WebKit and GTK development packages present to link.
+      - name: Install Linux build dependencies
+        if: runner.os == 'Linux'
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y libwebkit2gtk-4.1-dev libgtk-3-dev \
+            librsvg2-dev libssl-dev libayatana-appindicator3-dev patchelf
 
       - uses: Swatinem/rust-cache@v2
         with:
@@ -188,3 +198,50 @@ jobs:
           path: src-tauri/target/release/bundle/dmg/*.dmg
           if-no-files-found: error
           retention-days: 14
+
+  linux-package:
+    name: Linux .deb
+    runs-on: ubuntu-22.04
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: dtolnay/rust-toolchain@stable
+
+      - uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: src-tauri
+
+      # 22.04 rather than the newest image: a .deb links against the glibc it
+      # was built on, so building on the oldest supported Ubuntu is what makes
+      # it installable on the newer ones too.
+      - name: Install build dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y libwebkit2gtk-4.1-dev libgtk-3-dev \
+            librsvg2-dev libssl-dev libayatana-appindicator3-dev patchelf
+
+      - name: Cache the Tauri CLI
+        id: tauri-cli
+        uses: actions/cache@v4
+        with:
+          path: ~/.cargo/bin/cargo-tauri
+          key: tauri-cli-v2-${{ runner.os }}
+
+      - name: Install the Tauri CLI
+        if: steps.tauri-cli.outputs.cache-hit != 'true'
+        run: cargo install tauri-cli --version "^2" --locked
+
+      - name: Build the .deb
+        run: cargo tauri build --bundles deb
+
+      - name: Verify the package exists
+        run: |
+          deb="$(find src-tauri/target/release/bundle/deb -name '*.deb' -print -quit)"
+          [ -n "$deb" ] || { echo "::error::no .deb was produced"; exit 1; }
+          dpkg-deb --info "$deb"
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: easySSH-linux-deb
+          path: src-tauri/target/release/bundle/deb/*.deb
+          if-no-files-found: error

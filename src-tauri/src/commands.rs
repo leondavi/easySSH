@@ -9,7 +9,7 @@ use tauri::{AppHandle, Emitter, State};
 use tokio::sync::Mutex;
 
 use crate::model::{
-    AuthMethod, CommandResult, KeyInfo, KnownHost, KnownHostRef, ProbeStatus, Profile,
+    AuthMethod, CommandResult, KeyChoice, KeyInfo, KnownHost, KnownHostRef, ProbeStatus, Profile,
     SessionStatus, SetupResult, SshHostEntry, SshLocation, Tunnel,
 };
 use crate::state::{AppState, LiveSession};
@@ -146,19 +146,22 @@ pub async fn generate_key(
     keys::generate(&dir, &name, &algorithm, &comment, passphrase.as_deref()).map_err(anyhow_err)
 }
 
-/// Copy a private key the user picked — typically a `.pem` downloaded from the
-/// AWS console — into the active `.ssh` directory, with owner-only permissions
-/// and a `.pub` beside it.
+/// Take whatever the user picked in the file dialog and make it usable.
+///
+/// Deliberately forgiving about what "a key" is: the public half resolves to
+/// the private key beside it, a `.pem` from AWS is as good as an OpenSSH key,
+/// and a key the system `ssh` would refuse for its permissions is tightened —
+/// or copied into the `.ssh` directory at `0600` when it lives somewhere we
+/// should not be rewriting, like the downloads folder. `note` says what was
+/// done, when anything was.
 #[tauri::command]
-pub async fn import_key_file(state: State<'_, AppState>, path: String) -> Result<KeyInfo, String> {
+pub async fn use_key_file(state: State<'_, AppState>, path: String) -> Result<KeyChoice, String> {
     let dir = state.inner.lock().await.ssh_dir();
-    keys::import(&dir, Path::new(&path)).map_err(anyhow_err)
-}
-
-/// Validate a key the user picked with the file dialog.
-#[tauri::command]
-pub async fn inspect_key(path: String) -> Result<KeyInfo, String> {
-    keys::inspect_path(&path).map_err(anyhow_err)
+    let chosen = keys::use_key(&dir, Path::new(&path)).map_err(anyhow_err)?;
+    Ok(KeyChoice {
+        key: chosen.key,
+        note: chosen.note,
+    })
 }
 
 /// The `ssh-rsa AAAA... comment` line for a key, so the user can copy it.

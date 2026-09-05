@@ -147,6 +147,17 @@ pub struct KeyInfo {
     pub format: String,
 }
 
+/// A key the user picked in the file dialog, once easySSH has worked out what
+/// it actually is and put it into a state `ssh` accepts.
+#[derive(Debug, Clone, Serialize)]
+pub struct KeyChoice {
+    pub key: KeyInfo,
+    /// What had to be done to it — tightened permissions, a copy into the
+    /// `.ssh` directory, the private half found beside the public one. Empty
+    /// when the file was usable exactly as it was.
+    pub note: String,
+}
+
 /// A place on this machine where SSH configuration and keys live.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct SshLocation {

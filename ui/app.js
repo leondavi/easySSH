@@ -401,15 +401,17 @@ function keyLabel(k) {
 /** EC2 instances get names like ec2-13-51-2-3.eu-north-1.compute.amazonaws.com. */
 const AWS_HOST = /(^|\.)compute(-\d+)?\.amazonaws\.com$/i;
 
-/** Copy a private key — typically the .pem the AWS console downloads — into
- *  the active .ssh directory, at the permissions ssh insists on, with a .pub
- *  beside it. Returns null if the user cancelled the dialog. */
-async function importKeyFile() {
-  const path = await invoke("pick_key_file", { title: "Choose a .pem or private key to import" });
+/** Ask for a key file and let the Rust side work out what it is: either half
+ *  of an OpenSSH pair, a .pem straight from the AWS console, or a PuTTY .ppk.
+ *  Permissions are fixed and a .pub derived as needed; `note` says what was
+ *  done. Returns null if the user cancelled the dialog. */
+async function chooseKeyFile() {
+  const path = await invoke("pick_key_file", { title: "Choose a private key" });
   if (!path) return null;
-  const info = await invoke("import_key_file", { path });
+  const chosen = await invoke("use_key_file", { path });
   await reloadKeys();
-  return info;
+  if (chosen.note) toast(chosen.note, "success", 6000);
+  return chosen.key;
 }
 
 function renderKeyPicker(p) {
@@ -860,10 +862,10 @@ async function browseForKey() {
   const p = selected();
   if (!p) return;
   try {
-    const path = await invoke("pick_key_file", { startIn: state.location?.dir ?? null });
-    if (!path) return;
-    // Validate before saving so a wrong pick fails here, not at connect time.
-    const info = await invoke("inspect_key", { path });
+    // Whatever they picked is resolved and made usable before it is saved, so
+    // a wrong pick fails here rather than at connect time.
+    const info = await chooseKeyFile();
+    if (!info) return;
     if (!state.keys.some((k) => k.path === info.path)) state.keys.push(info);
     await saveProfile({ ...p, key_path: info.path, auth: "key" });
     toast(`Using ${info.name}`);
@@ -1079,10 +1081,10 @@ function profileSheet(existing) {
       h("label", { text: "Key" }),
       h("div", { class: "grow", style: "display:flex;flex-wrap:wrap;gap:6px" },
         keySel,
-        h("button", { class: "btn btn-small", text: "Import .pem…",
+        h("button", { class: "btn btn-small", text: "Browse…",
           onclick: async () => {
             try {
-              const info = await importKeyFile();
+              const info = await chooseKeyFile();
               if (info) useKey(info);
             } catch (e) { fail(e); }
           } }),
@@ -1103,7 +1105,7 @@ function profileSheet(existing) {
       "AWS EC2. The user name depends on the image: ec2-user (Amazon Linux), " +
       "ubuntu (Ubuntu), admin (Debian), or centos / rocky / fedora / bitnami. " +
       "Sign in with the .pem from the key pair you picked when launching the " +
-      "instance — Import .pem… copies it in with the permissions ssh requires." });
+      "instance: Browse… to it and easySSH sorts out its permissions." });
     const syncAws = () => {
       const isAws = AWS_HOST.test(hostIn.value.trim());
       awsHint.hidden = !isAws;
@@ -1413,16 +1415,6 @@ $("auth-toggle").addEventListener("click", () => {
 });
 
 $("browse-key").addEventListener("click", browseForKey);
-$("import-key").addEventListener("click", async () => {
-  const p = selected();
-  if (!p) return;
-  try {
-    const info = await importKeyFile();
-    if (!info) return;
-    await saveProfile({ ...p, key_path: info.path, auth: "key" });
-    toast(`Imported ${info.name} into ${state.location?.dir ?? "your .ssh directory"}`, "success");
-  } catch (e) { fail(e); }
-});
 $("show-key").addEventListener("click", () => {
   const p = selected();
   if (!p?.key_path) { toast("Choose a key first"); return; }

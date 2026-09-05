@@ -185,20 +185,32 @@ fn launch(command: &str) -> Result<()> {
 fn launch(command: &str) -> Result<()> {
     use anyhow::anyhow;
 
-    // Best-effort on Linux so `cargo run` works for contributors.
+    // `x-terminal-emulator` is Debian's alternatives entry, so on Debian and
+    // Ubuntu this lands on whatever terminal the user actually chose; the rest
+    // are fallbacks for distributions and desktops that have no such alias.
     const TERMINALS: &[(&str, &[&str])] = &[
         ("x-terminal-emulator", &["-e"]),
         ("gnome-terminal", &["--"]),
         ("konsole", &["-e"]),
+        ("kgx", &["--"]),
         ("alacritty", &["-e"]),
+        ("kitty", &["--"]),
         ("xterm", &["-e"]),
     ];
+    // Drop into a shell when ssh exits instead of closing the window with it:
+    // that is what `cmd /K` does on Windows and what Terminal.app does on
+    // macOS, and it is the difference between reading why a connection failed
+    // and watching the window vanish.
+    let script = format!("{command}; exec ${{SHELL:-sh}}");
     for (bin, prefix) in TERMINALS {
         let mut cmd = Command::new(bin);
-        cmd.args(*prefix).arg("sh").arg("-c").arg(command);
+        cmd.args(*prefix).arg("sh").arg("-c").arg(&script);
         if cmd.spawn().is_ok() {
             return Ok(());
         }
     }
-    Err(anyhow!("no terminal emulator found"))
+    Err(anyhow!(
+        "no terminal emulator found. Install one — on Debian or Ubuntu, \
+         `sudo apt-get install gnome-terminal` — or copy the command above."
+    ))
 }

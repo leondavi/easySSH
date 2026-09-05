@@ -92,6 +92,14 @@ fn harden_file(_path: &Path) -> Result<()> {
     Ok(())
 }
 
+/// Read a key file as text, without the byte-order mark some Windows editors
+/// leave in front. A BOM ahead of `-----BEGIN` makes the file look like
+/// something that is not a key at all.
+fn read_key_text(path: &Path) -> Result<String> {
+    let text = fs::read_to_string(path).with_context(|| format!("reading {}", path.display()))?;
+    Ok(text.strip_prefix('\u{feff}').unwrap_or(&text).to_string())
+}
+
 /// How a private key file is encoded, as shown in the key picker.
 ///
 /// `ssh-keygen` writes the OpenSSH format; AWS hands you a `.pem`, which is
@@ -163,8 +171,7 @@ pub fn public_key_for(private_path: &Path) -> Result<PublicKey> {
     }
     // No `.pub` beside it — the usual case for a `.pem` from AWS. Derive one,
     // which only works while the private key is not passphrase-protected.
-    let text = fs::read_to_string(private_path)
-        .with_context(|| format!("reading {}", private_path.display()))?;
+    let text = read_key_text(private_path)?;
     if pem_is_encrypted(&text) {
         return Err(anyhow!(
             "{} has no matching .pub file and the private key is passphrase-protected",
@@ -229,7 +236,7 @@ pub fn list_keys_in(dir: &Path) -> Result<Vec<KeyInfo>> {
 
 /// Describe a key file, or return `None` if it is not an OpenSSH private key.
 pub fn inspect(path: &Path) -> Option<KeyInfo> {
-    let text = fs::read_to_string(path).ok()?;
+    let text = read_key_text(path).ok()?;
     let format = detect_format(&text)?;
     let name = || {
         path.file_name()
@@ -367,8 +374,7 @@ pub fn generate(
 /// the `.ssh` directory at 0600, with a `.pub` beside it, makes it behave like
 /// any other key here.
 pub fn import(dir: &Path, source: &Path) -> Result<KeyInfo> {
-    let text =
-        fs::read_to_string(source).with_context(|| format!("reading {}", source.display()))?;
+    let text = read_key_text(source)?;
     if detect_format(&text).is_none() {
         return Err(anyhow!(
             "{} is not a private key. Choose the .pem file itself, not the .pub or a certificate.",
@@ -400,22 +406,175 @@ pub fn import(dir: &Path, source: &Path) -> Result<KeyInfo> {
     }
     harden_file(&dest)?;
 
-    // A `.pem` has no `.pub`; derive one so the key can be installed on other
-    // servers and shown in the public key viewer. An encrypted key cannot be
-    // read without its passphrase, and that is not a reason to fail the import.
-    let pub_path = pub_path_for(&dest);
-    if !pub_path.exists() {
-        if let Ok(key) = load_private(&text, None) {
-            if !key.is_encrypted() {
-                if let Ok(mut line) = key.public_key().to_openssh() {
-                    line.push('\n');
-                    let _ = fs::write(&pub_path, line);
-                }
+    write_public_key_beside(&dest, &text);
+
+    inspect(&dest).ok_or_else(|| anyhow!("{} could not be read back", dest.display()))
+}
+
+/// Write `<key>.pub` next to a private key that has none — the normal state of
+/// a `.pem` from AWS. Best effort: an encrypted key cannot be read without its
+/// passphrase, and a read-only directory is not a reason to fail, since the
+/// public half can always be derived again on demand.
+fn write_public_key_beside(private_path: &Path, text: &str) {
+    let pub_path = pub_path_for(private_path);
+    if pub_path.exists() {
+        return;
+    }
+    if let Ok(key) = load_private(text, None) {
+        if !key.is_encrypted() {
+            if let Ok(mut line) = key.public_key().to_openssh() {
+                line.push('\n');
+                let _ = fs::write(&pub_path, line);
             }
         }
     }
+}
 
-    inspect(&dest).ok_or_else(|| anyhow!("{} could not be read back", dest.display()))
+/// True when a private key file is readable by anyone but its owner, which is
+/// the state a `.pem` arrives in from a browser download — and the state the
+/// system `ssh` refuses outright.
+#[cfg(unix)]
+fn permissions_are_too_open(path: &Path) -> bool {
+    use std::os::unix::fs::PermissionsExt;
+    fs::metadata(path)
+        .map(|m| m.permissions().mode() & 0o077 != 0)
+        .unwrap_or(false)
+}
+
+/// Windows has no mode bits to read; `harden_file` rewrites the ACL either way.
+#[cfg(not(unix))]
+fn permissions_are_too_open(_path: &Path) -> bool {
+    false
+}
+
+/// What we settled on for a key the user picked, and what we had to do to it.
+#[derive(Debug)]
+pub struct Chosen {
+    pub key: KeyInfo,
+    /// A sentence for the UI when something was changed on disk. Empty when
+    /// the file was already in a state we could use as it was.
+    pub note: String,
+}
+
+/// Work out what the user actually picked in the file dialog, and make it
+/// usable.
+///
+/// The point is that nobody should have to know what an OpenSSH key looks like
+/// next to a `.pem`, or which half of a pair they are pointing at. So: a public
+/// key resolves to the private key beside it; any private key format is
+/// accepted; a key whose permissions the system `ssh` would refuse is either
+/// tightened where it lies or, if it lives outside the `.ssh` directory —
+/// the downloads folder, for a key straight from the AWS console — copied in
+/// at `0600`; and a `.pem` with no `.pub` gets one derived.
+pub fn use_key(ssh_dir: &Path, picked: &Path) -> Result<Chosen> {
+    if !picked.exists() {
+        return Err(anyhow!("{} does not exist", picked.display()));
+    }
+    let text = read_key_text(picked)?;
+
+    // The public half is the easy thing to pick by mistake: it sits right
+    // beside the private key and is the file people are used to copying about.
+    if detect_format(&text).is_none() {
+        let private = private_key_beside(picked, &text)?;
+        let text = read_key_text(&private)?;
+        let mut chosen = settle(ssh_dir, &private, &text)?;
+        chosen.note = format!(
+            "{} is the public half — using {} beside it.{}",
+            file_name_of(picked),
+            file_name_of(&chosen.key.path),
+            if chosen.note.is_empty() {
+                String::new()
+            } else {
+                format!(" {}", chosen.note)
+            }
+        );
+        return Ok(chosen);
+    }
+
+    settle(ssh_dir, picked, &text)
+}
+
+/// Given a file that is not a private key, find the private key it points at,
+/// or say clearly why we cannot.
+fn private_key_beside(picked: &Path, text: &str) -> Result<PathBuf> {
+    let looks_public = PublicKey::from_openssh(text.trim()).is_ok()
+        || text.contains("-----BEGIN PUBLIC KEY-----")
+        || text.contains("-----BEGIN CERTIFICATE-----")
+        || picked.extension().and_then(|e| e.to_str()) == Some("pub");
+
+    if !looks_public {
+        return Err(anyhow!(
+            "{} is not a private key. easySSH reads OpenSSH keys, PEM files \
+             (including the .pem AWS gives you) and PuTTY .ppk files.",
+            picked.display()
+        ));
+    }
+
+    // `id_ed25519.pub` → `id_ed25519`, which is the convention every tool uses.
+    let candidate = if picked.extension().and_then(|e| e.to_str()) == Some("pub") {
+        picked.with_extension("")
+    } else {
+        picked.to_path_buf()
+    };
+    if candidate != picked && candidate.is_file() && inspect(&candidate).is_some() {
+        return Ok(candidate);
+    }
+
+    Err(anyhow!(
+        "{} is a public key. Choose the private key it belongs to — the same \
+         name without .pub, or the .pem file from AWS.",
+        picked.display()
+    ))
+}
+
+/// Put one private key into a state `ssh` will accept, in place where that is
+/// enough and by copying it into the `.ssh` directory where it is not.
+fn settle(ssh_dir: &Path, path: &Path, text: &str) -> Result<Chosen> {
+    let inside_ssh_dir = path.parent() == Some(ssh_dir);
+
+    if permissions_are_too_open(path) && !inside_ssh_dir {
+        let key = import(ssh_dir, path)?;
+        return Ok(Chosen {
+            note: format!(
+                "Copied {} into {} and set it to 0600 — ssh refuses a key that \
+                 anyone else can read.",
+                file_name_of(path),
+                ssh_dir.display()
+            ),
+            key,
+        });
+    }
+
+    let tightened = permissions_are_too_open(path);
+    // On Windows this rewrites the ACL rather than a mode, and is best effort
+    // either way: a key easySSH itself can read is still a usable key here,
+    // and only the external `ssh` is strict about it.
+    let _ = harden_file(path);
+    write_public_key_beside(path, text);
+
+    let key = inspect(path).ok_or_else(|| {
+        anyhow!(
+            "{} is not a private key easySSH can read. OpenSSH keys, PEM files \
+             (including the .pem AWS gives you) and PuTTY .ppk files all work.",
+            path.display()
+        )
+    })?;
+
+    Ok(Chosen {
+        note: if tightened {
+            format!("Tightened {} to 0600.", file_name_of(path))
+        } else {
+            String::new()
+        },
+        key,
+    })
+}
+
+fn file_name_of(path: impl AsRef<Path>) -> String {
+    path.as_ref()
+        .file_name()
+        .map(|n| n.to_string_lossy().to_string())
+        .unwrap_or_else(|| path.as_ref().display().to_string())
 }
 
 /// The key we should offer by default in `dir`: an existing easySSH key, or a
@@ -600,6 +759,106 @@ QR18hXmAgGehm1QMMYGF34PAtBpTj+8/ZPFx2zZxir7pzDpfYoNAIf/fzLsW1ruG
             "unhelpful error: {err}"
         );
         assert_eq!(fs::read_to_string(&dest).unwrap(), PEM_RSA);
+    }
+
+    /// A key that has been through a Windows editor: CRLF line endings, and
+    /// sometimes a byte-order mark in front of the header.
+    #[test]
+    fn reads_a_pem_with_windows_line_endings_and_a_bom() {
+        let dir = tmpdir("crlf-pem");
+        let crlf = PEM_RSA.replace('\n', "\r\n");
+        assert_eq!(detect_format(&crlf), Some("PEM"));
+
+        let path = dir.join("windows.pem");
+        fs::write(&path, format!("\u{feff}{crlf}")).unwrap();
+        let info = inspect(&path).expect("a BOM does not stop it being a key");
+        assert_eq!(info.algorithm, "RSA");
+        assert!(authorized_keys_line(&path).unwrap().starts_with("ssh-rsa "));
+    }
+
+    #[test]
+    fn picking_a_world_readable_pem_copies_it_in_and_locks_it_down() {
+        let downloads = tmpdir("use-src");
+        let ssh_dir = tmpdir("use-dst");
+        let picked = downloads.join("aws-eu.pem");
+        fs::write(&picked, PEM_RSA).unwrap();
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            fs::set_permissions(&picked, fs::Permissions::from_mode(0o644)).unwrap();
+        }
+
+        let chosen = use_key(&ssh_dir, &picked).expect("a .pem is a key");
+        #[cfg(unix)]
+        {
+            assert_eq!(
+                chosen.key.path,
+                ssh_dir.join("aws-eu.pem").display().to_string()
+            );
+            assert!(
+                chosen.note.contains("0600"),
+                "unhelpful note: {}",
+                chosen.note
+            );
+        }
+        assert_eq!(chosen.key.algorithm, "RSA");
+        assert_eq!(chosen.key.format, "PEM");
+    }
+
+    #[test]
+    fn picking_a_key_that_is_already_private_leaves_it_where_it_is() {
+        let elsewhere = tmpdir("use-inplace");
+        let ssh_dir = tmpdir("use-inplace-ssh");
+        let picked = elsewhere.join("work.pem");
+        fs::write(&picked, PEM_RSA).unwrap();
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            fs::set_permissions(&picked, fs::Permissions::from_mode(0o600)).unwrap();
+        }
+
+        let chosen = use_key(&ssh_dir, &picked).expect("key");
+        assert_eq!(
+            chosen.key.path,
+            picked.display().to_string(),
+            "a key that is already private should not be copied about"
+        );
+        // The .pub it never had is derived beside it either way.
+        assert!(pub_path_for(&picked).is_file());
+    }
+
+    #[test]
+    fn picking_the_public_half_resolves_to_the_private_key() {
+        let dir = tmpdir("use-pub");
+        let private = dir.join("id_test");
+        fs::write(&private, PEM_RSA).unwrap();
+        let public = pub_path_for(&private);
+        fs::write(&public, authorized_keys_line(&private).unwrap() + "\n").unwrap();
+
+        let chosen = use_key(&dir, &public).expect("the private key is right beside it");
+        assert_eq!(chosen.key.path, private.display().to_string());
+        assert!(
+            chosen.note.contains("public half"),
+            "the user should be told what happened: {}",
+            chosen.note
+        );
+    }
+
+    #[test]
+    fn a_public_key_on_its_own_says_what_to_pick_instead() {
+        let dir = tmpdir("use-orphan-pub");
+        let public = dir.join("orphan.pub");
+        fs::write(
+            &public,
+            "ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAIExample me@host\n",
+        )
+        .unwrap();
+
+        let err = use_key(&dir, &public).expect_err("there is no private key here");
+        assert!(
+            err.to_string().contains("public key"),
+            "unhelpful error: {err}"
+        );
     }
 
     #[test]

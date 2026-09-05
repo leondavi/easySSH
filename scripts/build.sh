@@ -4,6 +4,7 @@
 #   ./scripts/build.sh              # bundle for the machine you are on
 #   ./scripts/build.sh macos        # .dmg + .app       (must run on macOS)
 #   ./scripts/build.sh windows      # .exe + .msi       (must run on Windows, or see below)
+#   ./scripts/build.sh linux        # .deb              (must run on Debian or Ubuntu)
 #   ./scripts/build.sh all          # everything this machine can produce
 #   ./scripts/build.sh --universal  # macOS: one binary for Apple Silicon + Intel
 #
@@ -91,6 +92,32 @@ build_macos() {
   fi
 }
 
+# Debian and Ubuntu. The bundler needs the WebKit and GTK development packages,
+# because the window easySSH draws in is the system's own web view rather than
+# one it ships. Say which packages are missing rather than letting the linker
+# fail three minutes into a build.
+build_linux() {
+  [[ "$HOST" == "linux" ]] || die "The .deb must be built on Debian or Ubuntu."
+
+  local missing=()
+  if command -v pkg-config >/dev/null; then
+    pkg-config --exists webkit2gtk-4.1 || missing+=(libwebkit2gtk-4.1-dev)
+    pkg-config --exists gtk+-3.0       || missing+=(libgtk-3-dev)
+  else
+    missing+=(pkg-config libwebkit2gtk-4.1-dev libgtk-3-dev)
+  fi
+  command -v patchelf >/dev/null || missing+=(patchelf)
+
+  if (( ${#missing[@]} )); then
+    die "Missing build dependencies. On Debian or Ubuntu:
+       sudo apt-get install -y ${missing[*]} librsvg2-dev libssl-dev \
+         libayatana-appindicator3-dev build-essential curl wget file"
+  fi
+
+  say "Bundling .deb"
+  cargo tauri build --bundles deb
+}
+
 build_windows() {
   if [[ "$HOST" != "windows" ]]; then
     die "Windows installers must be built on Windows (NSIS and WiX do not run here).
@@ -104,8 +131,8 @@ build_windows() {
 case "$TARGET" in
   macos)   build_macos ;;
   windows) build_windows ;;
-  linux)   say "Bundling for Linux"; cargo tauri build ;;
-  *)       die "Unknown target '$TARGET'. Use: macos, windows, all." ;;
+  linux)   build_linux ;;
+  *)       die "Unknown target '$TARGET'. Use: macos, windows, linux, all." ;;
 esac
 
 # ── report ───────────────────────────────────────────────────────────────────
