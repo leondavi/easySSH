@@ -96,7 +96,9 @@ jobs:
               problems.append(f"JS references element ids not in index.html: {missing}")
 
           registered = set(re.findall(r"commands::(\w+),", main))
-          defined    = set(re.findall(r"#\[tauri::command\]\s*\npub async fn (\w+)", cmds))
+          # A command need not be async — `app_version` returns a constant — so
+          # matching only `pub async fn` read a perfectly wired one as missing.
+          defined    = set(re.findall(r"#\[tauri::command\]\s*\npub (?:async )?fn (\w+)", cmds))
           if orphan := sorted(defined - registered):
               problems.append(f"commands defined but never registered: {orphan}")
           if ghost := sorted(registered - defined):
