@@ -11,7 +11,16 @@ use anyhow::Result;
 use crate::model::{AuthMethod, Profile};
 
 /// Build the argument list for `ssh`, including any tunnels the profile defines.
-pub fn ssh_args(profile: &Profile, include_tunnels: bool) -> Vec<String> {
+///
+/// `already_forwarded` names the local ports easySSH is forwarding itself.
+/// Handing those to `ssh -L` as well would have two processes racing for the
+/// same loopback port: whichever binds first wins, and the other reports the
+/// port as busy even though the forward the user wanted is already up.
+pub fn ssh_args(
+    profile: &Profile,
+    include_tunnels: bool,
+    already_forwarded: &[u16],
+) -> Vec<String> {
     let mut args: Vec<String> = Vec::new();
 
     if profile.port != 22 {
@@ -31,6 +40,9 @@ pub fn ssh_args(profile: &Profile, include_tunnels: bool) -> Vec<String> {
 
     if include_tunnels {
         for t in &profile.tunnels {
+            if already_forwarded.contains(&t.local_port) {
+                continue;
+            }
             args.push("-L".into());
             args.push(format!(
                 "127.0.0.1:{}:{}:{}",
@@ -44,10 +56,14 @@ pub fn ssh_args(profile: &Profile, include_tunnels: bool) -> Vec<String> {
 }
 
 /// A single command line, quoted for the shell that will receive it.
-pub fn ssh_command_line(profile: &Profile, include_tunnels: bool) -> String {
+pub fn ssh_command_line(
+    profile: &Profile,
+    include_tunnels: bool,
+    already_forwarded: &[u16],
+) -> String {
     let mut parts = vec!["ssh".to_string()];
     parts.extend(
-        ssh_args(profile, include_tunnels)
+        ssh_args(profile, include_tunnels, already_forwarded)
             .into_iter()
             .map(|a| quote(&a)),
     );
@@ -88,8 +104,8 @@ fn applescript_quote(s: &str) -> String {
 }
 
 /// Open the user's terminal with the SSH session already running.
-pub fn open(profile: &Profile, include_tunnels: bool) -> Result<String> {
-    let command = ssh_command_line(profile, include_tunnels);
+pub fn open(profile: &Profile, include_tunnels: bool, already_forwarded: &[u16]) -> Result<String> {
+    let command = ssh_command_line(profile, include_tunnels, already_forwarded);
     launch(&command)?;
     Ok(command)
 }
@@ -213,4 +229,66 @@ fn launch(command: &str) -> Result<()> {
         "no terminal emulator found. Install one — on Debian or Ubuntu, \
          `sudo apt-get install gnome-terminal` — or copy the command above."
     ))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::model::Tunnel;
+
+    fn profile_with_tunnels(ports: &[u16]) -> Profile {
+        let mut p = Profile {
+            id: "p1".into(),
+            name: "Server".into(),
+            host: "example.com".into(),
+            port: 22,
+            username: "david".into(),
+            auth: AuthMethod::Password,
+            key_path: None,
+            tunnels: Vec::new(),
+            last_connected: None,
+            color: None,
+            key_installed: false,
+            from_config: false,
+            config_alias: None,
+            customized: true,
+        };
+        p.tunnels = ports
+            .iter()
+            .map(|port| Tunnel {
+                id: format!("t{port}"),
+                name: format!("Port {port}"),
+                local_port: *port,
+                remote_host: "localhost".into(),
+                remote_port: *port,
+                auto_start: true,
+                scheme: "http".into(),
+            })
+            .collect();
+        p
+    }
+
+    #[test]
+    fn tunnels_become_local_forwards() {
+        let cmd = ssh_command_line(&profile_with_tunnels(&[4000, 5000]), true, &[]);
+        assert!(cmd.contains("-L 127.0.0.1:4000:localhost:4000"), "{cmd}");
+        assert!(cmd.contains("-L 127.0.0.1:5000:localhost:5000"), "{cmd}");
+    }
+
+    /// The terminal must not race easySSH for a port easySSH already holds:
+    /// only one process can bind it, and the loser reports the port as busy
+    /// while the forward the user wanted is in fact already up.
+    #[test]
+    fn a_port_easyssh_already_forwards_is_left_to_it() {
+        let cmd = ssh_command_line(&profile_with_tunnels(&[4000, 5000]), true, &[4000]);
+        assert!(!cmd.contains("127.0.0.1:4000"), "{cmd}");
+        assert!(cmd.contains("-L 127.0.0.1:5000:localhost:5000"), "{cmd}");
+    }
+
+    #[test]
+    fn tunnels_are_left_out_entirely_when_not_asked_for() {
+        let cmd = ssh_command_line(&profile_with_tunnels(&[4000]), false, &[]);
+        assert!(!cmd.contains("-L"), "{cmd}");
+        assert!(cmd.ends_with("david@example.com"), "{cmd}");
+    }
 }

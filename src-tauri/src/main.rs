@@ -293,6 +293,7 @@ fn main() {
             commands::app_settings,
             commands::import_ssh_host,
             commands::set_show_config_hosts,
+            commands::app_version,
         ])
         .setup(|app| {
             watch_ssh_config(app.handle().clone());

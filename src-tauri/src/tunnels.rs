@@ -42,9 +42,16 @@ pub async fn start(
     let bind = format!("127.0.0.1:{}", spec.local_port);
     let listener = TcpListener::bind(&bind).await.map_err(|e| {
         if e.kind() == std::io::ErrorKind::AddrInUse {
+            // Naming the likely culprit matters: the commonest holder of this
+            // port is an `ssh -L` session easySSH opened for the terminal,
+            // which means the forward is already working and telling the user
+            // to pick another port sends them the wrong way entirely.
             anyhow!(
-                "port {} is already in use on this machine — pick another local port",
-                spec.local_port
+                "{bind} is already in use on this machine. If you opened a terminal \
+                 for this connection with its tunnels included, that ssh session is \
+                 already forwarding this port — {} works as it is. Otherwise close \
+                 whatever holds the port, or give this tunnel a different local port.",
+                spec.local_url()
             )
         } else {
             anyhow!("could not listen on {bind}: {e}")

@@ -524,6 +524,16 @@ pub async fn stop_tunnel(
     Ok(())
 }
 
+// ----------------------------------------------------------------- about
+
+/// The version this build was compiled from, for the sidebar's wordmark.
+/// Taken from `Cargo.toml`, which `tauri.conf.json` is kept in step with, so
+/// there is one number to bump and no copy in the front end to drift.
+#[tauri::command]
+pub fn app_version() -> String {
+    env!("CARGO_PKG_VERSION").to_string()
+}
+
 // ---------------------------------------------------------------- terminal
 
 #[tauri::command]
@@ -533,12 +543,14 @@ pub async fn open_terminal(
     profile_id: String,
     include_tunnels: bool,
 ) -> Result<String, String> {
-    let profile = {
+    let (profile, forwarded) = {
         let inner = state.inner.lock().await;
-        inner
+        let profile = inner
             .profile(&profile_id)
             .ok_or("that connection no longer exists")?
-            .clone()
+            .clone();
+        let forwarded = live_forwarded_ports(&inner, &profile);
+        (profile, forwarded)
     };
     // The system ssh is about to take over, and unlike russh it refuses a key
     // anyone else can read. This is the moment that matters most.
@@ -547,7 +559,24 @@ pub async fn open_terminal(
             tidy_key(&app, path);
         }
     }
-    terminal::open(&profile, include_tunnels).map_err(anyhow_err)
+    terminal::open(&profile, include_tunnels, &forwarded).map_err(anyhow_err)
+}
+
+/// The local ports this connection is already forwarding from inside easySSH.
+///
+/// The terminal must leave these alone: a second `ssh -L` on the same port
+/// cannot bind, and if the terminal gets there first the app's own tunnel is
+/// the one that fails.
+fn live_forwarded_ports(inner: &crate::state::Inner, profile: &Profile) -> Vec<u16> {
+    let Some(live) = inner.sessions.get(&profile.id) else {
+        return Vec::new();
+    };
+    profile
+        .tunnels
+        .iter()
+        .filter(|t| live.tunnels.get(&t.id).map(|r| r.is_alive()) == Some(true))
+        .map(|t| t.local_port)
+        .collect()
 }
 
 /// The exact command the terminal button would run, shown in the UI.
@@ -561,7 +590,12 @@ pub async fn terminal_preview(
     let profile = inner
         .profile(&profile_id)
         .ok_or("that connection no longer exists")?;
-    Ok(terminal::ssh_command_line(profile, include_tunnels))
+    let forwarded = live_forwarded_ports(&inner, profile);
+    Ok(terminal::ssh_command_line(
+        profile,
+        include_tunnels,
+        &forwarded,
+    ))
 }
 
 /// Run an arbitrary command on an open session — used by the quick command bar.

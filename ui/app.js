@@ -1568,7 +1568,16 @@ setInterval(() => {
 
 /* ── boot ─────────────────────────────────────────────────────────────── */
 
+/** Stamp the build's version beside the wordmark. Best-effort: a missing
+ *  version is a blank label, never a failed start. */
+async function showVersion() {
+  try {
+    $("app-version").textContent = await invoke("app_version");
+  } catch { /* the wordmark reads fine on its own */ }
+}
+
 (async function boot() {
+  await showVersion();
   await reloadSettings();
   await reloadLocations();
   await reloadKeys();

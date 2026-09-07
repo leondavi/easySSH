@@ -12,7 +12,13 @@
 
   <!-- ───────────────────────────── sidebar ───────────────────────────── -->
   <aside class="sidebar" data-tauri-drag-region>
-    <div class="sidebar-top" data-tauri-drag-region></div>
+    <!-- The app's own title bar: the window has no OS one, and the header on
+         the right belongs to whichever connection is selected. Right-aligned
+         so it clears the macOS traffic lights sitting over this corner. -->
+    <div class="sidebar-top" data-tauri-drag-region>
+      <span class="brand" data-tauri-drag-region>easySSH</span>
+      <span class="brand-version mono" id="app-version" data-tauri-drag-region></span>
+    </div>
 
     <div class="search-wrap">
       <svg class="search-icon" viewBox="0 0 16 16" aria-hidden="true">
@@ -157,9 +163,12 @@
         <p class="card-sub">Opens your terminal app with the session already connected.</p>
         <div class="terminal-preview mono" id="terminal-preview"></div>
         <label class="checkbox">
-          <input type="checkbox" id="term-tunnels" checked />
+          <input type="checkbox" id="term-tunnels" />
           <span>Also open this connection's tunnels in the terminal session</span>
         </label>
+        <p class="card-sub">Off by default: easySSH forwards these ports itself, and a
+          terminal that binds them too leaves whichever starts second reporting the
+          port as busy. Any tunnel already running here is left out of the command.</p>
 
         <div class="run-row">
           <input id="run-input" type="text" placeholder="Run a command on the server…" spellcheck="false" />

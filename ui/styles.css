@@ -128,8 +128,31 @@ body {
   min-height: 0;
 }
 
-/* Clears the traffic lights. */
-.sidebar-top { height: 38px; flex: none; }
+/* The app title bar. Clears the traffic lights, which sit over its left. */
+.sidebar-top {
+  height: 38px;
+  flex: none;
+  display: flex;
+  align-items: center;
+  justify-content: flex-end;
+  gap: 6px;
+  padding: 0 12px;
+  -webkit-user-select: none;
+  user-select: none;
+}
+
+.brand {
+  font-size: 13px; font-weight: 600; letter-spacing: -0.01em;
+  color: var(--text);
+}
+
+.brand-version {
+  font-size: 10.5px;
+  color: var(--text-3);
+  /* Sits on the wordmark's baseline rather than centred against its cap height. */
+  align-self: flex-end;
+  padding-bottom: 1px;
+}
 
 .search-wrap {
   position: relative;
