@@ -201,34 +201,150 @@ fn launch(command: &str) -> Result<()> {
 fn launch(command: &str) -> Result<()> {
     use anyhow::anyhow;
 
-    // `x-terminal-emulator` is Debian's alternatives entry, so on Debian and
-    // Ubuntu this lands on whatever terminal the user actually chose; the rest
-    // are fallbacks for distributions and desktops that have no such alias.
-    const TERMINALS: &[(&str, &[&str])] = &[
-        ("x-terminal-emulator", &["-e"]),
-        ("gnome-terminal", &["--"]),
-        ("konsole", &["-e"]),
-        ("kgx", &["--"]),
-        ("alacritty", &["-e"]),
-        ("kitty", &["--"]),
-        ("xterm", &["-e"]),
-    ];
     // Drop into a shell when ssh exits instead of closing the window with it:
     // that is what `cmd /K` does on Windows and what Terminal.app does on
     // macOS, and it is the difference between reading why a connection failed
     // and watching the window vanish.
     let script = format!("{command}; exec ${{SHELL:-sh}}");
-    for (bin, prefix) in TERMINALS {
-        let mut cmd = Command::new(bin);
-        cmd.args(*prefix).arg("sh").arg("-c").arg(&script);
-        if cmd.spawn().is_ok() {
+
+    let mut tried: Vec<String> = Vec::new();
+    for (bin, prefix) in candidates() {
+        let mut cmd = Command::new(&bin);
+        cmd.args(&prefix).arg("sh").arg("-c").arg(&script);
+        let Ok(child) = cmd.spawn() else {
+            continue; // not installed
+        };
+        if started(child) {
             return Ok(());
         }
+        tried.push(bin);
+    }
+
+    if tried.is_empty() {
+        return Err(anyhow!(
+            "no terminal emulator found. Install one — on Debian or Ubuntu, \
+             `sudo apt-get install gnome-terminal` — set $TERMINAL to the one \
+             you prefer, or copy the command above and run it yourself."
+        ));
     }
     Err(anyhow!(
-        "no terminal emulator found. Install one — on Debian or Ubuntu, \
-         `sudo apt-get install gnome-terminal` — or copy the command above."
+        "{} would not open. Set $TERMINAL to the terminal you use, or copy the \
+         command above and run it yourself.",
+        tried.join(", ")
     ))
+}
+
+/// The terminals to try, in order, each with the arguments that make it run a
+/// command. The flag is not interchangeable between families: several of these
+/// accept the wrong one, open, and then run nothing.
+///
+/// Built on every unix, not only where it is used: this is the one launcher
+/// with no OS API to lean on, and compiling it on macOS too means its tests
+/// run wherever they are run at all.
+#[cfg(unix)]
+#[cfg_attr(target_os = "macos", allow(dead_code))]
+fn candidates() -> Vec<(String, Vec<String>)> {
+    // `-e` is the flag Debian policy requires of a terminal emulator, so it is
+    // the right guess for one we were told about but know nothing else of.
+    const GENERIC: &[&str] = &["-e"];
+
+    const TERMINALS: &[(&str, &[&str])] = &[
+        // The freedesktop launcher: it resolves the user's configured terminal
+        // itself, so where it exists it is more likely right than our guesses.
+        ("xdg-terminal-exec", &[]),
+        // Debian's alternatives entry — on Debian and Ubuntu this is whatever
+        // terminal the user actually chose.
+        ("x-terminal-emulator", GENERIC),
+        // GTK family. `-e` is deprecated in these and takes a single string,
+        // so it would swallow `sh` and leave `-c` behind as an unknown option;
+        // `--` ends option parsing and passes the argv through intact.
+        ("gnome-terminal", &["--"]),
+        ("kgx", &["--"]),
+        ("ptyxis", &["--"]),
+        ("mate-terminal", &["--"]),
+        // These spell the same idea `-x`: everything after it is the command.
+        ("xfce4-terminal", &["-x"]),
+        ("terminator", &["-x"]),
+        ("tilix", &["-e"]),
+        ("konsole", GENERIC),
+        ("qterminal", GENERIC),
+        ("deepin-terminal", GENERIC),
+        ("alacritty", GENERIC),
+        ("wezterm", &["start", "--"]),
+        // kitty and foot take the command straight after their own options,
+        // with no flag introducing it.
+        ("kitty", &[]),
+        ("foot", &[]),
+        ("urxvt", GENERIC),
+        ("rxvt", GENERIC),
+        ("st", GENERIC),
+        ("xterm", GENERIC),
+    ];
+
+    let mut out: Vec<(String, Vec<String>)> = Vec::new();
+
+    // An explicit choice beats anything we would work out for ourselves. It
+    // may name a terminal we know, in which case use the arguments we know
+    // are right for it rather than the generic guess.
+    if let Ok(term) = std::env::var("TERMINAL") {
+        let term = term.trim();
+        if !term.is_empty() {
+            let known = TERMINALS
+                .iter()
+                .find(|(bin, _)| {
+                    Some(*bin)
+                        == std::path::Path::new(term)
+                            .file_name()
+                            .and_then(|f| f.to_str())
+                })
+                .map(|(_, args)| *args)
+                .unwrap_or(GENERIC);
+            out.push((
+                term.to_string(),
+                known.iter().map(|a| a.to_string()).collect(),
+            ));
+        }
+    }
+
+    out.extend(TERMINALS.iter().map(|(bin, args)| {
+        (
+            bin.to_string(),
+            args.iter().map(|a| a.to_string()).collect(),
+        )
+    }));
+    out
+}
+
+/// Whether a spawned terminal actually opened.
+///
+/// Spawning only proves the binary exists and forked. A terminal handed a flag
+/// it does not understand prints a usage message and exits within moments, and
+/// treating that as success is how easySSH could report an open terminal while
+/// the user saw no window at all — with the remaining candidates never tried.
+#[cfg(unix)]
+#[cfg_attr(target_os = "macos", allow(dead_code))]
+fn started(mut child: std::process::Child) -> bool {
+    use std::time::{Duration, Instant};
+
+    let deadline = Instant::now() + Duration::from_millis(400);
+    loop {
+        match child.try_wait() {
+            // Still up after the grace period: the window is the user's now.
+            Ok(None) if Instant::now() >= deadline => {
+                // Reap it in the background rather than leaving a zombie
+                // behind for as long as easySSH keeps running.
+                std::thread::spawn(move || {
+                    let _ = child.wait();
+                });
+                return true;
+            }
+            Ok(None) => std::thread::sleep(Duration::from_millis(20)),
+            // gnome-terminal and its relatives hand the window to a session
+            // daemon and exit at once, so a zero status here is a success too.
+            Ok(Some(status)) => return status.success(),
+            Err(_) => return false,
+        }
+    }
 }
 
 #[cfg(test)]
@@ -283,6 +399,77 @@ mod tests {
         let cmd = ssh_command_line(&profile_with_tunnels(&[4000, 5000]), true, &[4000]);
         assert!(!cmd.contains("127.0.0.1:4000"), "{cmd}");
         assert!(cmd.contains("-L 127.0.0.1:5000:localhost:5000"), "{cmd}");
+    }
+
+    /// The GTK terminals must not be handed `-e`: it is deprecated there and
+    /// takes a single string, so `-e sh -c <script>` runs `sh` with no script
+    /// and leaves `-c` behind as an unknown option.
+    #[cfg(unix)]
+    #[test]
+    fn the_gtk_terminals_get_argv_passed_through_not_a_deprecated_flag() {
+        let all = candidates();
+        for name in ["gnome-terminal", "kgx", "ptyxis", "mate-terminal"] {
+            let args = all
+                .iter()
+                .find(|(bin, _)| bin == name)
+                .map(|(_, a)| a.clone())
+                .unwrap_or_else(|| panic!("{name} is not among the candidates"));
+            assert_eq!(args, vec!["--".to_string()], "{name}");
+        }
+    }
+
+    /// Whatever the user chose is tried before anything easySSH guesses at.
+    ///
+    /// Both halves live in one test on purpose: the environment belongs to the
+    /// whole process, and split in two they would race each other.
+    #[cfg(unix)]
+    #[test]
+    fn the_terminal_env_var_is_tried_first_when_it_is_set() {
+        // SAFETY: the variable is set, read back and removed here alone.
+        unsafe { std::env::remove_var("TERMINAL") };
+        assert_eq!(candidates()[0].0, "xdg-terminal-exec");
+
+        unsafe { std::env::set_var("TERMINAL", "/usr/bin/kitty") };
+        let chosen = candidates()[0].clone();
+        unsafe { std::env::remove_var("TERMINAL") };
+
+        assert_eq!(chosen.0, "/usr/bin/kitty");
+        // Recognised by name even when given as a path: kitty takes the
+        // command with no flag introducing it, so `-e` would break it.
+        assert!(chosen.1.is_empty(), "{:?}", chosen.1);
+    }
+
+    /// The bug this replaced: a terminal that exits at once having run nothing
+    /// was reported as a success, and the candidates after it never tried.
+    #[cfg(unix)]
+    #[test]
+    fn a_terminal_that_fails_immediately_is_not_counted_as_started() {
+        let child = std::process::Command::new("sh")
+            .args(["-c", "exit 1"])
+            .spawn()
+            .expect("spawn");
+        assert!(!started(child));
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn a_terminal_that_stays_open_is_counted_as_started() {
+        let child = std::process::Command::new("sh")
+            .args(["-c", "sleep 5"])
+            .spawn()
+            .expect("spawn");
+        assert!(started(child));
+    }
+
+    /// gnome-terminal hands the window to its session daemon and exits at once.
+    #[cfg(unix)]
+    #[test]
+    fn a_terminal_that_hands_off_and_exits_cleanly_is_counted_as_started() {
+        let child = std::process::Command::new("sh")
+            .args(["-c", "exit 0"])
+            .spawn()
+            .expect("spawn");
+        assert!(started(child));
     }
 
     #[test]
