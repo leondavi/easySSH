@@ -1,6 +1,6 @@
 [package]
 name = "easyssh"
-version = "1.5.2"
+version = "1.5.3"
 description = "easySSH - effortless SSH connections, key setup and remote web tunnels"
 authors = ["easySSH contributors"]
 edition = "2021"
