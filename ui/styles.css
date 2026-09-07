@@ -134,12 +134,18 @@ body {
   flex: none;
   display: flex;
   align-items: center;
+  /* Flush with the right edge, on the same 12px inset as the search field
+     below it, so the wordmark and the search box share one margin. */
   justify-content: flex-end;
-  gap: 6px;
   padding: 0 12px;
   -webkit-user-select: none;
   user-select: none;
 }
+
+/* Centred as a unit by the row above, while the two labels inside it line up
+   on their shared baseline — the version reads as a suffix of the wordmark
+   rather than a second thing that happens to be nearby. */
+.brand-block { display: flex; align-items: baseline; gap: 5px; }
 
 .brand {
   font-size: 13px; font-weight: 600; letter-spacing: -0.01em;
@@ -147,11 +153,9 @@ body {
 }
 
 .brand-version {
-  font-size: 10.5px;
+  font-size: 10px;
+  letter-spacing: 0;
   color: var(--text-3);
-  /* Sits on the wordmark's baseline rather than centred against its cap height. */
-  align-self: flex-end;
-  padding-bottom: 1px;
 }
 
 .search-wrap {
