@@ -13,7 +13,7 @@ use crate::model::{
     Profile, SessionStatus, SetupResult, SshHostEntry, SshLocation, Tunnel,
 };
 use crate::state::{AppState, LiveSession};
-use crate::{keys, knownhosts, ssh, sshconfig, store, terminal, tunnels};
+use crate::{ezconfig, keys, knownhosts, ssh, sshconfig, store, terminal, tunnels};
 
 /// Turn any error into the string the UI shows. `{:#}` includes anyhow's context chain.
 fn err<E: std::fmt::Display>(e: E) -> String {
@@ -78,6 +78,19 @@ pub async fn save_profile(
             return Err(format!(
                 "local port {} is used by more than one tunnel in this connection",
                 t.local_port
+            ));
+        }
+        // Refuse it here rather than discovering it in the config file: this
+        // is written as a `LocalForward` line, and one ssh cannot parse stops
+        // ssh reading the whole file — every connection on the machine, not
+        // just this one.
+        if !ezconfig::is_forwardable_host(&t.remote_host) {
+            return Err(format!(
+                "\"{}\" is not an address the server can be asked to reach. \
+                 Give the tunnel \"{}\" a host name or IP as the server sees it \
+                 — \"localhost\", not a full URL.",
+                t.remote_host.trim(),
+                t.name
             ));
         }
     }

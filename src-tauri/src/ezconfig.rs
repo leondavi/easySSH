@@ -151,7 +151,45 @@ fn parse_forward(value: &str) -> Option<(u16, String, u16)> {
     // The local side may carry a bind address we always write as 127.0.0.1.
     let local_port: u16 = local.rsplit(':').next()?.parse().ok()?;
     let (host, port) = remote.rsplit_once(':')?;
+    if !is_forwardable_host(host) {
+        return None; // ssh would not accept this line either
+    }
     Some((local_port, host.to_string(), port.parse().ok()?))
+}
+
+/// True when `host` can stand as the remote side of a `LocalForward`.
+///
+/// This is not a nicety. ssh parses that field positionally, so a slash, a
+/// space or a stray colon does not spoil one connection — it makes the whole
+/// file invalid, and `ez_config` is included from the user's own config, so
+/// every `ssh` on the machine stops working, easySSH's or not:
+///
+/// ```text
+/// ~/.ssh/ez_config line 21: Bad forwarding specification.
+/// ~/.ssh/ez_config: terminating, 1 bad configuration options
+/// ```
+///
+/// A URL pasted where a host was asked for is the way in — that is exactly
+/// what people have on the clipboard when they are looking at the page they
+/// want to reach.
+pub fn is_forwardable_host(host: &str) -> bool {
+    if host.is_empty()
+        || host.len() > 255
+        || host.contains(char::is_whitespace)
+        || host.contains(['/', '\\', '"', '\'', '#', '='])
+    {
+        return false;
+    }
+    match host.strip_prefix('[').and_then(|s| s.strip_suffix(']')) {
+        // A bracketed IPv6 literal is the one form that may hold colons.
+        Some(inner) => {
+            !inner.is_empty()
+                && inner
+                    .chars()
+                    .all(|c| c.is_ascii_hexdigit() || matches!(c, ':' | '.' | '%'))
+        }
+        None => !host.contains(':'),
+    }
 }
 
 /// The `Host` aliases easySSH has taken in this directory. ssh resolves them
@@ -285,6 +323,20 @@ pub fn save(dir: &Path, profiles: &[Profile]) -> io::Result<()> {
             }
         }
         for t in &p.tunnels {
+            // Leaving the line out costs one tunnel. Writing it costs the
+            // user every ssh on the machine, so this check comes last as
+            // well as first: nothing easySSH stores may make ssh refuse to
+            // read the file it is included from.
+            if !is_forwardable_host(&t.remote_host) {
+                log::warn!(
+                    "tunnel {:?}: {:?} is not an address ssh can forward to, \
+                     leaving it out of {}",
+                    t.name,
+                    t.remote_host,
+                    FILE_NAME
+                );
+                continue;
+            }
             body.push_str(&format!(
                 "    LocalForward 127.0.0.1:{} {}:{}\n",
                 t.local_port, t.remote_host, t.remote_port
@@ -394,6 +446,7 @@ fn unique_alias(profile: &Profile, used: &mut HashSet<String>) -> String {
 
 #[cfg(test)]
 mod tests {
+
     use super::*;
 
     fn profile(name: &str, host: &str) -> Profile {
@@ -566,5 +619,59 @@ mod tests {
         let text = fs::read_to_string(path_for(&dir)).unwrap();
         assert!(text.contains("Host owned"));
         assert!(!text.contains("from-config"), "{text}");
+    }
+
+    /// The failure this guards against is not a broken tunnel but a broken
+    /// machine: ssh stops reading the file, so every connection on it fails.
+    #[test]
+    fn a_url_is_not_an_address_ssh_can_forward_to() {
+        assert!(!is_forwardable_host("http://localhost:4200/access"));
+        assert!(!is_forwardable_host("localhost:4200"));
+        assert!(!is_forwardable_host("with space"));
+        assert!(!is_forwardable_host("has/slash"));
+        assert!(!is_forwardable_host("trailing#comment"));
+        assert!(!is_forwardable_host(""));
+    }
+
+    #[test]
+    fn plain_hosts_and_bracketed_ipv6_are_forwardable() {
+        for host in ["localhost", "10.0.0.4", "db-1.internal", "srv_2", "[::1]"] {
+            assert!(is_forwardable_host(host), "{host}");
+        }
+    }
+
+    /// A forward that would take ssh's whole config down is left out, and the
+    /// connection it belongs to is still written.
+    #[test]
+    fn a_tunnel_ssh_could_not_parse_is_left_out_of_the_file() {
+        let dir = tmpdir("badforward");
+        let mut p = profile("dash", "34.135.236.0");
+        let mut bad = tunnel(4200, 4200);
+        bad.remote_host = "http://localhost:4200/access".into();
+        p.tunnels = vec![bad, tunnel(4300, 4300)];
+
+        save(&dir, &[p]).unwrap();
+        let text = std::fs::read_to_string(path_for(&dir)).unwrap();
+
+        assert!(!text.contains("http://"), "{text}");
+        assert!(
+            text.contains("LocalForward 127.0.0.1:4300 localhost:4300"),
+            "{text}"
+        );
+        assert!(
+            text.contains("HostName"),
+            "the connection survives:\n{text}"
+        );
+    }
+
+    /// And a line like that already in the file is not read back into a
+    /// tunnel, which would only write it out again.
+    #[test]
+    fn a_forward_ssh_would_reject_is_not_read_back() {
+        assert!(parse_forward("127.0.0.1:4200 http://localhost:4200/access:4200").is_none());
+        assert_eq!(
+            parse_forward("127.0.0.1:4200 localhost:4200"),
+            Some((4200, "localhost".to_string(), 4200))
+        );
     }
 }

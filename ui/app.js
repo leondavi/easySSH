@@ -949,6 +949,18 @@ function tunnelSheet(p, existing) {
     const scheme = h("select", {},
       h("option", { value: "http", text: "http", selected: t.scheme !== "https" }),
       h("option", { value: "https", text: "https", selected: t.scheme === "https" }));
+
+    // A URL is what you have on the clipboard when you are looking at the page
+    // you want to reach, so take one apart into the fields it answers instead
+    // of storing it as a host name. Done on blur so the split is visible in the
+    // form rather than happening silently at save.
+    remoteHost.addEventListener("change", () => {
+      const url = asUrl(remoteHost.value);
+      if (!url) return;
+      remoteHost.value = url.host;
+      if (url.port) remotePort.value = String(url.port);
+      if (url.scheme) scheme.value = url.scheme;
+    });
     const auto = h("input", { type: "checkbox", checked: !!t.auto_start });
 
     const err = h("div", { class: "sheet-error", hidden: true });
@@ -959,6 +971,10 @@ function tunnelSheet(p, existing) {
       if (!(lp >= 1 && lp <= 65535)) throw "The local port must be between 1 and 65535.";
       if (!(rp >= 1 && rp <= 65535)) throw "The remote port must be between 1 and 65535.";
       if (!remoteHost.value.trim()) throw "Enter the address as the server sees it.";
+      if (!isForwardableHost(remoteHost.value.trim())) {
+        throw "The remote host is a host name or IP as the server sees it — " +
+              "\"localhost\" or \"10.0.0.4\" — not a URL or a path.";
+      }
 
       const next = {
         id: t.id || crypto.randomUUID(),
@@ -1013,6 +1029,36 @@ function tunnelSheet(p, existing) {
         remove,
         h("button", { class: "btn", text: "Cancel", onclick: close }), go));
   });
+}
+
+/** Pull a pasted URL apart, or return null when the text is a plain host.
+ *  "http://localhost:4200/access" is a URL; "localhost" is not, and neither is
+ *  a bare IPv6 address, which is all colons and no scheme. */
+function asUrl(value) {
+  const raw = value.trim();
+  if (!raw || !/^[a-z][a-z0-9+.-]*:\/\//i.test(raw)) return null;
+  try {
+    const u = new URL(raw);
+    if (!u.hostname) return null;
+    return {
+      host: u.hostname,
+      port: u.port ? Number(u.port) : null,
+      scheme: u.protocol === "https:" ? "https" : u.protocol === "http:" ? "http" : null,
+    };
+  } catch {
+    return null;
+  }
+}
+
+/** Mirrors `ezconfig::is_forwardable_host`. ssh reads the remote host as one
+ *  positional field, and a value it cannot parse invalidates the whole config
+ *  file — so this is caught before it can be saved, not after. */
+function isForwardableHost(host) {
+  if (!host || host.length > 255) return false;
+  if (/[\s/\\"'#=]/.test(host)) return false;
+  const v6 = host.match(/^\[(.+)\]$/);
+  if (v6) return /^[0-9a-f:.%]+$/i.test(v6[1]);
+  return !host.includes(":");
 }
 
 function suggestLocalPort(p) {
