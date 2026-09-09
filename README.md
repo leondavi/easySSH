@@ -39,8 +39,19 @@ easySSH does all of that from one window.
 `.deb` for Debian and Ubuntu. Or [build it yourself](#building-from-source) in
 one command.
 
-> On macOS, an unsigned build needs a right-click → **Open** the first time.
-> That is Gatekeeper doing its job on software without an Apple certificate.
+> On macOS the build carries no Apple certificate, so Gatekeeper stops it the
+> first time. Open **System Settings → Privacy & Security**, scroll to the note
+> about easySSH being blocked, and click **Open Anyway**. On older macOS a
+> right-click → **Open** does the same thing.
+>
+> If macOS instead says easySSH *"is damaged and can't be opened"* — releases
+> up to and including **v1.5.3** shipped a `.app` whose signature was
+> incomplete, and that is the message macOS gives for one it cannot validate.
+> Either take a build after v1.5.3, or clear the download flag yourself:
+>
+> ```sh
+> xattr -dr com.apple.quarantine /Applications/easySSH.app
+> ```
 
 **2 · Your servers are already there.** If you have a `~/.ssh/config`, every
 `Host` in it appears in the sidebar the moment you open the app, tagged `cfg`.

@@ -94,11 +94,19 @@ jobs:
             echo "sign=false" >> "$GITHUB_OUTPUT"
           fi
 
+      # Without a certificate the bundle still has to be *signed*, ad-hoc, or
+      # the .app ships with only the linker's signature on the executable and
+      # no sealed bundle — and macOS refuses that outright: "easySSH is damaged
+      # and can't be opened", with no right-click → Open to get past it. An
+      # identity of "-" makes the bundler run codesign before it builds the
+      # .dmg, which downgrades that to the ordinary unidentified-developer
+      # prompt users can approve.
       - name: Build
         if: steps.signing.outputs.sign == 'false'
         uses: tauri-apps/tauri-action@v0
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          APPLE_SIGNING_IDENTITY: ${{ runner.os == 'macOS' && '-' || '' }}
         with:
           projectPath: .
           tauriScript: cargo tauri

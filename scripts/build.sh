@@ -78,6 +78,18 @@ build_macos() {
   done
   rm -f "$BUNDLE_DIR"/macos/rw.*.dmg "$BUNDLE_DIR"/dmg/rw.*.dmg 2>/dev/null || true
 
+  # Sign before the bundler runs, not after. `cargo tauri build` produces the
+  # .app *and* the .dmg in one pass, so a signature applied to the .app
+  # afterwards never reaches the copy inside the disk image — which ships with
+  # nothing but the linker's ad-hoc signature on the executable and no sealed
+  # bundle, and Gatekeeper calls that "damaged and can't be opened". Letting
+  # the bundler sign with identity "-" gets a real _CodeSignature into the
+  # bundle it packages. A Developer ID certificate, if there is one, wins.
+  if [[ -z "${APPLE_SIGNING_IDENTITY:-}" ]]; then
+    say "Ad-hoc signing (no APPLE_SIGNING_IDENTITY set)"
+    export APPLE_SIGNING_IDENTITY="-"
+  fi
+
   say "Bundling .app and .dmg"
   local bundle_status=0
   cargo tauri build "${args[@]}" || bundle_status=$?
@@ -85,14 +97,6 @@ build_macos() {
   local app
   app="$(find "$BUNDLE_DIR/macos" -maxdepth 1 -name '*.app' -print -quit 2>/dev/null || true)"
   [[ -n "$app" ]] || die "the build produced no .app"
-
-  # Ad-hoc sign so Gatekeeper does not refuse to launch a locally built app.
-  # A real release needs a Developer ID certificate and notarisation; see README.
-  if [[ -z "${APPLE_SIGNING_IDENTITY:-}" ]]; then
-    say "Ad-hoc signing $(basename "$app")"
-    codesign --force --deep --sign - "$app" 2>/dev/null \
-      || warn "ad-hoc signing failed; the .app may need a right-click → Open on first launch"
-  fi
 
   # The .app is built and signed by now; only the disk image can still be
   # missing. Tauri's bundle_dmg.sh styles the volume through the Finder and
