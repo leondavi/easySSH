@@ -102,6 +102,8 @@
         </div>
         <div class="led-strip" id="led-strip"></div>
 
+        <p id="degraded-note" class="degraded-note" hidden></p>
+
         <div id="fingerprint-row" class="fingerprint" hidden>
           <span class="mono" id="fingerprint"></span>
         </div>
@@ -153,11 +155,24 @@
       <div class="card">
         <div class="card-head">
           <h3>Web tunnels</h3>
-          <button id="add-tunnel" class="btn btn-plain btn-small">Add Tunnel</button>
+          <div class="tunnel-actions">
+            <button id="check-tunnels" class="btn btn-plain btn-small"
+                    title="Test the connection now and rebuild any forward that has stopped working">Check Now</button>
+            <button id="add-tunnel" class="btn btn-plain btn-small">Add Tunnel</button>
+          </div>
         </div>
         <p class="card-sub">Reach services on the server — or anything on its network — as if they ran on this machine.</p>
         <ul id="tunnel-list" class="tunnel-list"></ul>
         <p id="tunnel-empty" class="muted-row">No tunnels yet.</p>
+        <label class="checkbox">
+          <input type="checkbox" id="auto-restore" checked />
+          <span>Rebuild tunnels automatically when the connection drops</span>
+        </label>
+        <p class="card-sub">A forward keeps listening on this machine even after the SSH
+          connection behind it dies, so the switch stays on while nothing gets through.
+          easySSH checks for that and puts the connection back. The lamp beside each
+          tunnel says whether it has ever had to: green never, yellow restored,
+          red could not be.</p>
       </div>
 
       <div class="card">

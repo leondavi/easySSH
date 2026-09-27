@@ -52,6 +52,7 @@ const state = {
   location: null,       // the one in focus
   configHosts: [],      // Host blocks parsed from the focused config
   showConfigHosts: true, // list hosts read from the ssh config alongside our own
+  autoRestore: true,    // watch live forwards and rebuild the ones that die
 };
 
 const selected = () => state.profiles.find((p) => p.id === state.selectedId) || null;
@@ -59,17 +60,21 @@ const statusOf = (id) => state.statuses.get(id) || { connected: false, tunnels: 
 const probeOf = (id) => state.probes.get(id) || {};
 
 /* ── indicator model ──────────────────────────────────────────────────────
-   Four lamps per connection. Each resolves to a colour class plus the words
+   Five lamps per connection. Each resolves to a colour class plus the words
    shown beside it in the detail pane and in the sidebar tooltip. */
 
 function leds(p) {
   const st = statusOf(p.id);
   const pr = probeOf(p.id);
 
-  // 1. Session — green only while a connection is actually open.
-  const connected = st.connected
-    ? { cls: "green", label: "Connected", note: "" }
-    : { cls: "unknown", label: "Not connected", note: "" };
+  // 1. Session — green only while a connection is actually open, and amber
+  //    while it is open in name but no longer carrying traffic. Without that
+  //    middle state a dropped transport looks identical to a healthy one.
+  const connected = !st.connected
+    ? { cls: "unknown", label: "Not connected", note: "" }
+    : st.degraded
+      ? { cls: "amber blink", label: "Connection dropped", note: "rebuilding" }
+      : { cls: "green", label: "Connected", note: "" };
 
   // 2. Reachability — blue when the SSH port answers, red when it does not.
   const reachable =
@@ -101,8 +106,29 @@ function leds(p) {
         : { cls: "red", label: "Tunnels inactive", note: st.connected ? "" : "connect to start them" };
   }
 
-  return { connected, reachable, keyAuth, tunnel };
+  // 5. Restore — has easySSH had to put a forward back under the user?
+  //    Green: never. Yellow: yes, and it is working. Red: it tried and could
+  //    not. Only shown once there is a live session to say it about; before
+  //    that the answer would be about the last session, not this one.
+  let restore = null;
+  if (p.tunnels.length && st.connected) {
+    const rows = st.tunnels || [];
+    const broken = rows.find((t) => t.restore === "failed");
+    const rebuilt = rows.filter((t) => t.restore === "restored");
+    const times = rows.reduce((n, t) => n + (t.restores || 0), 0);
+    restore = broken
+      ? { cls: "red blink", label: "Tunnel not restored",
+          note: broken.restore_note || "easySSH could not rebuild this forward" }
+      : rebuilt.length
+        ? { cls: "yellow", label: `Tunnel restored ${plural(times, "time")}`,
+            note: rebuilt[0].restore_note || "" }
+        : { cls: "green", label: "Never dropped", note: "" };
+  }
+
+  return { connected, reachable, keyAuth, tunnel, restore };
 }
+
+const plural = (n, word) => `${n} ${word}${n === 1 ? "" : "s"}`;
 
 /** Something the user should look at on the Authentication card. */
 function authHasIssue(p) {
@@ -235,7 +261,7 @@ function renderSidebar() {
       p.from_config ? h("span", { class: "row-tag", title: "From your ssh config", text: "cfg" }) : null,
       (() => {
         const l = leds(p);
-        const shown = [l.connected, l.reachable, l.keyAuth, l.tunnel].filter(Boolean);
+        const shown = [l.connected, l.reachable, l.keyAuth, l.tunnel, l.restore].filter(Boolean);
         return h("span", {
           class: "row-leds",
           title: shown.map((x) => x.label + (x.note ? ` (${x.note})` : "")).join("\n"),
@@ -294,12 +320,23 @@ function renderDetail() {
 
   const lamp = leds(p);
   $("led-strip").replaceChildren(
-    ...[lamp.connected, lamp.reachable, lamp.keyAuth, lamp.tunnel]
+    ...[lamp.connected, lamp.reachable, lamp.keyAuth, lamp.tunnel, lamp.restore]
       .filter(Boolean)
       .map((l) => h("div", { class: "led-item", title: l.note || l.label },
         h("span", { class: `led ${l.cls}` }),
         h("span", { class: "led-label", text: l.label }),
         l.note ? h("span", { class: "led-note", text: `· ${l.note}` }) : null)));
+
+  // Say plainly what a dropped-but-open connection means, because the symptom
+  // the user sees is a page that will not load, not a lamp.
+  const degraded = $("degraded-note");
+  degraded.hidden = !st.degraded;
+  degraded.textContent = st.degraded
+    ? "This connection has stopped carrying traffic. easySSH is rebuilding it — " +
+      "tunnels will come back on their own."
+    : "";
+
+  $("check-tunnels").disabled = !st.connected;
 
   const fpRow = $("fingerprint-row");
   fpRow.hidden = !st.server_fingerprint;
@@ -483,10 +520,29 @@ function renderTunnels(p, st) {
       onclick: () => canToggle && toggleTunnel(p, t, !!ts.running),
     });
 
+    // The restore lamp, per forward: green never dropped, yellow put back,
+    // red could not be. Only meaningful while the session is open.
+    const restore = !st.connected ? null
+      : ts.restore === "failed" ? { cls: "red blink", text: "could not be restored" }
+      : ts.restore === "restored" ? { cls: "yellow", text: `restored ${plural(ts.restores || 1, "time")}` }
+      : { cls: "green", text: "" };
+
     return h("li", {}, h("div", { class: "tunnel-row" },
       sw,
       h("div", { class: "tunnel-main" },
-        h("span", { class: "tunnel-name", text: t.name || `Port ${t.local_port}` }),
+        h("div", { class: "tunnel-name-row" },
+          h("span", { class: "tunnel-name", text: t.name || `Port ${t.local_port}` }),
+          restore ? h("span", {
+            class: `led ${restore.cls}`,
+            title: ts.restore_note || "This forward has not dropped since the connection opened",
+          }) : null,
+          restore && restore.text
+            ? h("span", {
+                class: `tunnel-restored${ts.restore === "failed" ? " failed" : ""}`,
+                title: ts.restore_note || "",
+                text: restore.text,
+              })
+            : null),
         h("span", { class: "tunnel-path",
           text: `127.0.0.1:${t.local_port} → ${t.remote_host}:${t.remote_port}` +
                 (ts.running ? `  ·  ${ts.connections} connection${ts.connections === 1 ? "" : "s"}` : "") }),
@@ -572,8 +628,10 @@ async function reloadSettings() {
   try {
     const s = await invoke("app_settings");
     state.showConfigHosts = s.show_config_hosts !== false;
+    state.autoRestore = s.auto_restore_tunnels !== false;
   } catch { /* keep the current value */ }
   $("show-config-hosts").checked = state.showConfigHosts;
+  $("auto-restore").checked = state.autoRestore;
 }
 
 async function reloadConfigHosts() {
@@ -1510,6 +1568,36 @@ $("show-config-hosts").addEventListener("change", async (e) => {
 });
 $("setup-btn").addEventListener("click", () => selected() && setupSheet(selected()));
 $("add-tunnel").addEventListener("click", () => selected() && tunnelSheet(selected(), null));
+
+/* Test the connection and rebuild whatever has stopped working, now rather
+   than on the supervisor's own unhurried schedule. */
+$("check-tunnels").addEventListener("click", async (e) => {
+  const btn = e.target;
+  const was = btn.textContent;
+  btn.disabled = true;
+  btn.textContent = "Checking…";
+  try {
+    await invoke("restore_tunnels", { profileId: state.selectedId });
+    await reloadStatuses();
+    toast("Tunnels checked");
+  } catch (err) {
+    fail(err);
+  } finally {
+    btn.textContent = was;
+    btn.disabled = !statusOf(state.selectedId)?.connected;
+  }
+});
+
+$("auto-restore").addEventListener("change", async (e) => {
+  const enabled = e.target.checked;
+  try {
+    await invoke("set_auto_restore_tunnels", { enabled });
+    state.autoRestore = enabled;
+  } catch (err) {
+    fail(err);
+    e.target.checked = state.autoRestore;   // the setting did not stick
+  }
+});
 $("auth-toggle").addEventListener("click", () => {
   // A forced-open card can still be collapsed; the next render re-opens it
   // while the problem remains, which is the behaviour we want.
@@ -1577,6 +1665,23 @@ listen("probe-status", (e) => {
 });
 
 listen("tunnel-error", (e) => fail(e.payload.error));
+
+/* A connection dropped and easySSH put it back. Worth saying out loud: the
+   user may well be looking at a page that failed a moment ago and needs to
+   know it is worth reloading. */
+listen("tunnels-restored", async (e) => {
+  await reloadStatuses();
+  const { name, restored, total } = e.payload;
+  toast(restored === total
+    ? `${name}: the connection dropped and its tunnels were restored`
+    : `${name}: the connection dropped — ${restored} of ${total} tunnels restored`,
+    restored === total ? "success" : "error", 7000);
+});
+
+listen("tunnels-restore-failed", async (e) => {
+  await reloadStatuses();
+  fail(`The connection dropped and could not be rebuilt: ${e.payload.error}`);
+});
 
 /* easySSH tightened — or could not tighten — a key on the way to using it.
    Said out loud because it is a change to a file the user owns. */

@@ -25,6 +25,11 @@ dirs = "6"
 uuid = { version = "1", features = ["v4", "serde"] }
 log = "0.4"
 
+[dev-dependencies]
+# The mock runtime, so the tunnel supervisor can be driven end to end without a
+# window. Test builds only; the shipped app is unaffected.
+tauri = { version = "2", features = ["macos-private-api", "test"] }
+
 [features]
 custom-protocol = ["tauri/custom-protocol"]
 

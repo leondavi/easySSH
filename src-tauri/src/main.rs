@@ -7,6 +7,7 @@ mod keys;
 mod knownhosts;
 mod model;
 mod probe;
+mod restore;
 mod ssh;
 mod sshconfig;
 mod state;
@@ -36,6 +37,16 @@ const KEY_TICK: Duration = Duration::from_secs(30);
 /// Cap on concurrent probes, so a long list of servers does not open a hundred
 /// sockets at once.
 const PROBE_CONCURRENCY: usize = 8;
+
+/// How often live sessions are checked for forwards that have stopped carrying
+/// traffic.
+///
+/// Frequent enough that a dropped forward is usually back before the user has
+/// finished reloading the page, and rare enough that the check — one SSH channel
+/// per session — is not itself a load worth worrying about. `restore::backoff`
+/// governs how often a session that cannot be rebuilt is retried, so a host that
+/// is genuinely down is not handshaked every twenty seconds.
+const TUNNEL_TICK: Duration = Duration::from_secs(20);
 
 /// Re-read the ssh config whenever it changes on disk.
 ///
@@ -215,6 +226,24 @@ fn watch_key_auth(app: AppHandle) {
     });
 }
 
+/// Watch the forwards easySSH is running and rebuild the ones that have died.
+///
+/// This is what stops a tunnel from going quietly useless when the SSH transport
+/// underneath it drops: the local listener survives that, so without a check
+/// like this one nothing notices until the user does. See `restore` for the
+/// details of what is detected and what is done about it.
+fn watch_tunnels(app: AppHandle) {
+    tauri::async_runtime::spawn(async move {
+        loop {
+            tokio::time::sleep(TUNNEL_TICK).await;
+            let swept = restore::sweep(&app).await;
+            if swept != restore::Swept::default() {
+                log::info!("tunnel sweep: {swept:?}");
+            }
+        }
+    });
+}
+
 async fn emit_probes(app: &AppHandle) {
     let state = app.state::<AppState>();
     let all: Vec<model::ProbeStatus> = {
@@ -294,11 +323,14 @@ fn main() {
             commands::import_ssh_host,
             commands::set_show_config_hosts,
             commands::app_version,
+            commands::restore_tunnels,
+            commands::set_auto_restore_tunnels,
         ])
         .setup(|app| {
             watch_ssh_config(app.handle().clone());
             watch_reachability(app.handle().clone());
             watch_key_auth(app.handle().clone());
+            watch_tunnels(app.handle().clone());
             Ok(())
         })
         .run(tauri::generate_context!())

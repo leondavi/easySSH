@@ -1,13 +1,43 @@
 //! Everything the app holds in memory: profiles, live sessions, live tunnels.
 
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::sync::Arc;
 
 use tokio::sync::Mutex;
 
-use crate::model::{ProbeStatus, Profile, SessionStatus, Settings, Tunnel, TunnelStatus};
+use crate::model::{
+    ProbeStatus, Profile, RestoreState, SessionStatus, Settings, Tunnel, TunnelStatus,
+};
 use crate::ssh::Session;
 use crate::tunnels::RunningTunnel;
+
+/// What has happened to one forward since its session opened, for the restore
+/// lamp. Lives in memory only: a fresh connection starts with a clean sheet,
+/// which is what the green "never restored" lamp is meant to mean.
+#[derive(Debug, Clone, Default)]
+pub struct RestoreRecord {
+    /// Successful rebuilds.
+    pub count: u32,
+    /// True when the most recent attempt failed, so the lamp goes red rather
+    /// than yellow. Cleared by the next attempt that works.
+    pub failed: bool,
+    /// Unix seconds of the last attempt, successful or not.
+    pub at: Option<u64>,
+    /// A sentence for the tooltip: what broke, and what was done about it.
+    pub note: Option<String>,
+}
+
+impl RestoreRecord {
+    pub fn state(&self) -> RestoreState {
+        if self.failed {
+            RestoreState::Failed
+        } else if self.count > 0 {
+            RestoreState::Restored
+        } else {
+            RestoreState::Never
+        }
+    }
+}
 
 /// One connected host and the forwards running over it.
 pub struct LiveSession {
@@ -16,6 +46,47 @@ pub struct LiveSession {
     /// Errors reported by tunnel tasks after they started, keyed by tunnel id.
     pub tunnel_errors: Arc<Mutex<HashMap<String, String>>>,
     pub remote_description: String,
+    /// Tunnel ids the user wants up. A forward whose id is still in here when
+    /// it stops is one to rebuild; one the user switched off is not, and the
+    /// distinction is the whole difference between restoring a tunnel and
+    /// fighting the user over it.
+    pub desired: HashSet<String>,
+    /// Restore history per tunnel id.
+    pub restores: HashMap<String, RestoreRecord>,
+    /// The secret this session authenticated with — a password, or a key
+    /// passphrase — kept in memory for as long as the session is open so it can
+    /// be rebuilt without prompting again. Never persisted, never logged, and
+    /// dropped with the session.
+    pub secret: Option<String>,
+    /// True while the SSH transport is known to be broken and easySSH has not
+    /// managed to replace it. The UI needs this because a session in that state
+    /// is still open as far as the connection list is concerned, but nothing
+    /// sent through it arrives — the exact state that used to be invisible.
+    pub degraded: bool,
+    /// Consecutive failed attempts to rebuild this session, used to grow the
+    /// wait between them.
+    pub restore_failures: u32,
+    /// When the next rebuild may be attempted. `None` means "as soon as the
+    /// supervisor notices".
+    pub next_restore: Option<std::time::Instant>,
+}
+
+impl LiveSession {
+    /// A session that has just been opened: nothing wanted, nothing restored.
+    pub fn new(session: Session, remote_description: String, secret: Option<String>) -> Self {
+        Self {
+            session,
+            tunnels: HashMap::new(),
+            tunnel_errors: Arc::new(Mutex::new(HashMap::new())),
+            remote_description,
+            desired: HashSet::new(),
+            restores: HashMap::new(),
+            secret,
+            degraded: false,
+            restore_failures: 0,
+            next_restore: None,
+        }
+    }
 }
 
 impl LiveSession {
@@ -30,6 +101,7 @@ impl LiveSession {
         SessionStatus {
             profile_id: profile.id.clone(),
             connected: true,
+            degraded: self.degraded,
             server_fingerprint: Some(self.session.fingerprint.clone()),
             first_contact: self.session.first_contact,
             tunnels,
@@ -38,6 +110,7 @@ impl LiveSession {
 
     fn tunnel_status(&self, spec: &Tunnel, errors: &HashMap<String, String>) -> TunnelStatus {
         let running = self.tunnels.get(&spec.id);
+        let restore = self.restores.get(&spec.id);
         TunnelStatus {
             id: spec.id.clone(),
             running: running.map(|t| t.is_alive()).unwrap_or(false),
@@ -46,7 +119,29 @@ impl LiveSession {
                 .map(|t| t.connections.load(std::sync::atomic::Ordering::Relaxed))
                 .unwrap_or(0),
             error: errors.get(&spec.id).cloned(),
+            restore: restore.map(|r| r.state()).unwrap_or_default(),
+            restores: restore.map(|r| r.count).unwrap_or(0),
+            restored_at: restore.and_then(|r| r.at),
+            restore_note: restore.and_then(|r| r.note.clone()),
         }
+    }
+
+    /// Note that a forward was rebuilt successfully.
+    pub fn record_restored(&mut self, tunnel_id: &str, why: &str) {
+        let record = self.restores.entry(tunnel_id.to_string()).or_default();
+        record.count = record.count.saturating_add(1);
+        record.failed = false;
+        record.at = Some(crate::store::now());
+        record.note = Some(format!("{why} — rebuilt automatically ({}x)", record.count));
+    }
+
+    /// Note that a forward could not be rebuilt. The successful-restore count is
+    /// kept: "restored twice, then failed" is more useful than either alone.
+    pub fn record_restore_failed(&mut self, tunnel_id: &str, why: &str) {
+        let record = self.restores.entry(tunnel_id.to_string()).or_default();
+        record.failed = true;
+        record.at = Some(crate::store::now());
+        record.note = Some(why.to_string());
     }
 }
 
@@ -220,6 +315,11 @@ fn local_user() -> String {
 #[derive(Default)]
 pub struct AppState {
     pub inner: Mutex<Inner>,
+    /// Held for the duration of a tunnel-restore sweep, so only one runs at a
+    /// time. Two overlapping sweeps would each rebuild the same forwards, and
+    /// the loser of the race for the local port would be recorded as a restore
+    /// that failed — a red lamp over a tunnel that is working perfectly well.
+    pub sweeping: Mutex<()>,
 }
 
 impl AppState {
@@ -235,6 +335,7 @@ impl AppState {
         inner.sync_config_profiles();
         Self {
             inner: Mutex::new(inner),
+            sweeping: Mutex::new(()),
         }
     }
 }
@@ -243,6 +344,45 @@ impl AppState {
 mod tests {
     use super::*;
     use crate::model::{AuthMethod, Settings};
+
+    /// The three lamp colours the user asked for, in the order they happen.
+    #[test]
+    fn the_restore_lamp_reads_green_then_yellow_then_red() {
+        let mut r = RestoreRecord::default();
+        assert_eq!(r.state(), RestoreState::Never, "a fresh forward is green");
+
+        r.count = 1;
+        assert_eq!(
+            r.state(),
+            RestoreState::Restored,
+            "a forward that was put back is yellow"
+        );
+
+        r.failed = true;
+        assert_eq!(
+            r.state(),
+            RestoreState::Failed,
+            "a forward that could not be put back is red"
+        );
+
+        // A later success clears the red without forgetting the history.
+        r.failed = false;
+        r.count = 2;
+        assert_eq!(r.state(), RestoreState::Restored);
+        assert_eq!(r.count, 2);
+    }
+
+    /// Red must win over yellow. A forward that was restored twice and then
+    /// failed is broken now, and that is what the lamp has to say.
+    #[test]
+    fn a_failed_restore_outranks_earlier_successes() {
+        let r = RestoreRecord {
+            count: 2,
+            failed: true,
+            ..Default::default()
+        };
+        assert_eq!(r.state(), RestoreState::Failed);
+    }
 
     fn config_dir(tag: &str, body: &str) -> std::path::PathBuf {
         let dir = std::env::temp_dir().join(format!("easyssh-state-{tag}-{}", std::process::id()));

@@ -136,6 +136,114 @@ pub async fn start() -> u16 {
     start_with(None).await
 }
 
+/// A test server reached through a proxy the test can cut, so a connected
+/// client can lose its transport the way it does in the wild.
+///
+/// Aborting the server's own task is not enough: russh drives a session on an
+/// internal task of its own, so the session survives and keeps answering. Only
+/// interfering with the bytes on the wire reproduces the real failure.
+pub struct Cuttable {
+    /// The port the client should connect to.
+    pub port: u16,
+    /// The server itself, bypassing the proxy — a route that still works
+    /// after the proxied one has been cut, as a reconnect finds once the
+    /// network is back.
+    pub upstream: u16,
+    proxy: tokio::task::JoinHandle<()>,
+    /// Every relay the proxy has spawned, so `cut` can drop their sockets. The
+    /// accept loop alone is not enough: aborting it stops new connections and
+    /// leaves the established one relaying happily.
+    relays: Arc<std::sync::Mutex<Vec<tokio::task::AbortHandle>>>,
+    /// Set to stop relaying while both sockets stay open.
+    silence: tokio::sync::watch::Sender<bool>,
+}
+
+impl Cuttable {
+    /// Drop the sockets, so the client is reset — a server restart, or a
+    /// firewall that answers.
+    pub fn cut(&self) {
+        self.proxy.abort();
+        if let Ok(relays) = self.relays.lock() {
+            for r in relays.iter() {
+                r.abort();
+            }
+        }
+    }
+
+    /// Keep the sockets open and relay nothing at all.
+    ///
+    /// This is the failure that made easySSH's tunnels go quietly useless: the
+    /// laptop slept, or a NAT table forgot the flow, and neither end is told.
+    /// russh notices nothing, the local listener keeps accepting, and every
+    /// channel opened on the session hangs instead of failing.
+    pub fn blackhole(&self) {
+        let _ = self.silence.send(true);
+    }
+}
+
+/// Start an echoing server behind a proxy that `Cuttable` can interfere with.
+pub async fn start_cuttable() -> Cuttable {
+    let upstream = start().await;
+
+    let listener = TcpListener::bind("127.0.0.1:0").await.expect("bind proxy");
+    let port = listener.local_addr().unwrap().port();
+    let (silence, rx) = tokio::sync::watch::channel(false);
+    let relays: Arc<std::sync::Mutex<Vec<tokio::task::AbortHandle>>> = Arc::default();
+    let registry = relays.clone();
+
+    let proxy = tokio::spawn(async move {
+        while let Ok((client, _)) = listener.accept().await {
+            let Ok(server) = tokio::net::TcpStream::connect(("127.0.0.1", upstream)).await else {
+                return;
+            };
+            let task = tokio::spawn(relay(client, server, rx.clone()));
+            if let Ok(mut open) = registry.lock() {
+                open.push(task.abort_handle());
+            }
+        }
+    });
+
+    Cuttable {
+        port,
+        upstream,
+        proxy,
+        relays,
+        silence,
+    }
+}
+
+/// Copy bytes both ways until either side closes, or the test asks for silence.
+async fn relay(
+    mut client: tokio::net::TcpStream,
+    mut server: tokio::net::TcpStream,
+    mut silence: tokio::sync::watch::Receiver<bool>,
+) {
+    use tokio::io::{AsyncReadExt, AsyncWriteExt};
+    let mut from_client = vec![0u8; 8192];
+    let mut from_server = vec![0u8; 8192];
+
+    loop {
+        tokio::select! {
+            _ = silence.changed() => {}
+            r = client.read(&mut from_client) => match r {
+                Ok(0) | Err(_) => return,
+                Ok(n) => if server.write_all(&from_client[..n]).await.is_err() { return },
+            },
+            r = server.read(&mut from_server) => match r {
+                Ok(0) | Err(_) => return,
+                Ok(n) => if client.write_all(&from_server[..n]).await.is_err() { return },
+            },
+        }
+
+        if *silence.borrow() {
+            // Hold both sockets open forever and forward nothing. Returning
+            // here would close them, which is the failure we are *not*
+            // reproducing.
+            std::future::pending::<()>().await;
+        }
+    }
+}
+
 /// Start a server that executes commands for real, with `HOME` bound to
 /// a sandbox directory.
 ///

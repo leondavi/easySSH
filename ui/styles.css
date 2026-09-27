@@ -10,6 +10,7 @@
   --accent-ring:   rgba(0, 122, 255, 0.35);
   --green:         #34c759;
   --orange:        #ff9f0a;
+  --yellow:        #ffd60a;
   --red:           #ff3b30;
 
   --bg-window:     #ffffff;
@@ -50,6 +51,7 @@
     --accent-ring:   rgba(10, 132, 255, 0.45);
     --green:         #32d74b;
     --orange:        #ff9f0a;
+    --yellow:        #ffd60a;
     --red:           #ff453a;
 
     --bg-window:     #1c1c1e;
@@ -906,6 +908,9 @@ input, select, textarea { user-select: text; }
 .led.blue    { --led: var(--accent); }
 .led.red     { --led: var(--red); }
 .led.amber   { --led: var(--orange); }
+/* The restore lamp's "put back and working again". A yellow this bright needs
+   a darker ring than the others or it reads as a smudge on a light background. */
+.led.yellow  { --led: var(--yellow); box-shadow: 0 0 0 3px color-mix(in srgb, var(--orange) 26%, transparent); }
 .led.unknown { --led: var(--text-3); box-shadow: none; opacity: 0.55; }
 
 /* A tunnel that failed keeps pulsing, because an error the user has not seen
@@ -935,6 +940,24 @@ input, select, textarea { user-select: text; }
   --led: rgba(0, 0, 0, 0.3);
   box-shadow: 0 0 0 1.5px rgba(255, 255, 255, 0.5);
   opacity: 1;
+}
+
+/* A tunnel row's restore lamp sits with the name, so the forward that was
+   rebuilt is the one wearing the mark. */
+.tunnel-name-row { display: flex; align-items: center; gap: 6px; }
+.tunnel-restored {
+  font-size: 11.5px;
+  color: var(--text-3);
+}
+.tunnel-restored.failed { color: var(--red); }
+
+/* The whole connection is open but carrying nothing. Said in the status card
+   rather than only in a lamp, because it is the answer to "why is my page not
+   loading". */
+.degraded-note {
+  margin-top: 10px;
+  font-size: 12px;
+  color: var(--orange);
 }
 
 /* ── disclosure card ──────────────────────────────────────────────────── */

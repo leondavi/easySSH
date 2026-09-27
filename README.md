@@ -84,16 +84,17 @@ you try to connect.
 
 ## Status at a glance
 
-Every connection carries four lamps, in the sidebar and on its detail page.
+Every connection carries five lamps, in the sidebar and on its detail page.
 easySSH keeps them current in the background, so you can see the state of your
 fleet without clicking into anything.
 
-| Lamp | Green | Blue | Red | Grey |
-| --- | --- | --- | --- | --- |
-| **Session** | connected now | — | — | not connected |
-| **Reachable** | — | the SSH port answers | nothing answered | not checked yet |
-| **Key login** | logs in without a password | — | the key was refused | unknown |
-| **Tunnels** | at least one is up | — | all down, or **blinking** on an error | no tunnels defined |
+| Lamp | Green | Blue | Yellow | Red | Grey |
+| --- | --- | --- | --- | --- | --- |
+| **Session** | connected now | — | dropped, being rebuilt | — | not connected |
+| **Reachable** | — | the SSH port answers | — | nothing answered | not checked yet |
+| **Key login** | logs in without a password | — | — | the key was refused | unknown |
+| **Tunnels** | at least one is up | — | — | all down, or **blinking** on an error | no tunnels defined |
+| **Restore** | never dropped | — | dropped and put back | could not be put back | not connected |
 
 Reachability is a TCP connect to the SSH port, not an ICMP ping: it needs no
 special privileges, behaves the same on macOS and Windows, and tests the port
@@ -162,6 +163,42 @@ Mark a tunnel **auto-start** and it comes up the moment you connect. Add or
 edit one while the connection is already open and easySSH starts it there and
 then, so it never sits idle waiting for a reconnect. The switch beside each
 tunnel turns it on and off by hand.
+
+### Tunnels that put themselves back
+
+A tunnel has two halves that fail independently: a listening port on this
+machine, and the SSH connection carrying its traffic. The listening port is the
+durable one. When the SSH connection dies — the laptop slept, the Wi-Fi
+changed, a VPN dropped, `sshd` restarted — the port carries on accepting
+connections and only the traffic stops.
+
+That used to be the worst kind of failure, because nothing looked wrong. The
+switch was still on, the status still said the tunnel was running, and the
+browser simply hung. Disconnecting and reconnecting was the only cure.
+
+easySSH now checks every 20 seconds whether each live connection can still
+carry a forward — by opening a real SSH channel on it, since a dropped
+connection can look open for a long time — and rebuilds the connection and its
+tunnels when it cannot. Password and passphrase connections are rebuilt too:
+the secret you typed is kept in memory for as long as the session is open, and
+never written anywhere.
+
+The **Restore** lamp beside each tunnel says what has happened to it since you
+connected:
+
+| | |
+| --- | --- |
+| 🟢 **green** | it has never dropped |
+| 🟡 **yellow** | it dropped and was put back — the count says how often |
+| 🔴 **red** | it dropped and easySSH could not put it back |
+
+A yellow lamp means everything works; it is there so that a link which keeps
+dropping is distinguishable from one that never has. A host that stays down is
+retried on a widening interval rather than handshaked every 20 seconds.
+
+**Check Now** on the Web tunnels card runs the check immediately, and the
+checkbox beneath the list turns the whole thing off if you would rather manage
+it yourself.
 
 ---
 
@@ -378,6 +415,7 @@ src-tauri/src/
   keys.rs        key discovery, inspection and generation
   terminal.rs    handing an ssh command to the platform's terminal
   probe.rs       background reachability and key-login checks
+  restore.rs     watching live forwards and rebuilding the dead ones
   testserver.rs  a real SSH server, for tests
   ezconfig.rs    the ez_config connection store in ~/.ssh
   store.rs       app settings, and the move off the old profiles.json

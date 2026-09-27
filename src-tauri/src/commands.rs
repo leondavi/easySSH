@@ -1,19 +1,17 @@
 //! The API the UI calls. Every command returns `Result<_, String>` so failures
 //! arrive in the front end as a readable sentence rather than a stack trace.
 
-use std::collections::HashMap;
 use std::path::Path;
 use std::sync::Arc;
 
 use tauri::{AppHandle, Emitter, State};
-use tokio::sync::Mutex;
 
 use crate::model::{
     AuthMethod, CommandResult, KeyChoice, KeyInfo, KeyNotice, KnownHost, KnownHostRef, ProbeStatus,
     Profile, SessionStatus, SetupResult, SshHostEntry, SshLocation, Tunnel,
 };
 use crate::state::{AppState, LiveSession};
-use crate::{ezconfig, keys, knownhosts, ssh, sshconfig, store, terminal, tunnels};
+use crate::{ezconfig, keys, knownhosts, restore, ssh, sshconfig, store, terminal};
 
 /// Turn any error into the string the UI shows. `{:#}` includes anyhow's context chain.
 fn err<E: std::fmt::Display>(e: E) -> String {
@@ -35,6 +33,7 @@ async fn emit_status(app: &AppHandle, state: &AppState, profile_id: &str) {
         None => SessionStatus {
             profile_id: profile_id.to_string(),
             connected: false,
+            degraded: false,
             server_fingerprint: None,
             first_contact: false,
             tunnels: Vec::new(),
@@ -251,12 +250,10 @@ pub async fn connect(
         .map_err(anyhow_err)?;
     let remote_description = ssh::describe_remote(&session.handle).await;
 
-    let mut live = LiveSession {
-        session,
-        tunnels: HashMap::new(),
-        tunnel_errors: Arc::new(Mutex::new(HashMap::new())),
-        remote_description,
-    };
+    // The secret goes with the session so the tunnel supervisor can rebuild it
+    // after the transport drops without prompting the user again. In memory
+    // only, and gone the moment they disconnect.
+    let mut live = LiveSession::new(session, remote_description, secret);
 
     // Bring up anything marked auto-start. A tunnel that cannot bind is reported
     // but does not fail the connection itself.
@@ -267,8 +264,14 @@ pub async fn connect(
         .cloned()
         .collect();
     for spec in auto {
-        match spawn_tunnel(&app, &live, spec.clone()).await {
+        match spawn_tunnel(&app, &live, spec.clone(), None).await {
             Ok(running) => {
+                // Only a forward that actually came up is one to put back later.
+                // Marking a failed start as wanted would make the restore lamp
+                // go red over a tunnel that never worked in the first place,
+                // which is a different problem with a different fix — and the
+                // error below already says so.
+                live.desired.insert(spec.id.clone());
                 live.tunnels.insert(spec.id.clone(), running);
             }
             Err(e) => {
@@ -278,6 +281,18 @@ pub async fn connect(
     }
 
     let mut inner = state.inner.lock().await;
+    if inner.sessions.contains_key(&profile_id) {
+        // Another connect for this profile finished while this one was in its
+        // handshake. Keep that one and hang this one up: overwriting it would
+        // drop its forwards without stopping them — `RunningTunnel` does not
+        // stop on drop — leaving their local ports held for good.
+        drop(inner);
+        for (_, t) in live.tunnels {
+            t.stop();
+        }
+        ssh::disconnect(&live.session.handle).await;
+        return Err("that connection is already open".into());
+    }
     // Deliberately not adopted: connecting to a host defined in the ssh config
     // must not copy it into profiles.json, or deleting its `Host` block later
     // would leave a connection here that nothing can remove.
@@ -294,29 +309,23 @@ pub async fn connect(
     Ok(status)
 }
 
-/// Start a forward, wiring its late errors back into the session's error map.
+/// Start a forward on a session, wiring its late errors back into that
+/// session's error map. The mechanics live in `restore`, which rebuilds
+/// forwards on its own too, so both paths behave identically.
 async fn spawn_tunnel(
     app: &AppHandle,
     live: &LiveSession,
     spec: Tunnel,
-) -> Result<tunnels::RunningTunnel, String> {
-    let errors = live.tunnel_errors.clone();
-    let id = spec.id.clone();
-    let app = app.clone();
-    tunnels::start(live.session.handle.clone(), spec, move |msg| {
-        let errors = errors.clone();
-        let id = id.clone();
-        let app = app.clone();
-        tokio::spawn(async move {
-            errors.lock().await.insert(id.clone(), msg.clone());
-            let _ = app.emit(
-                "tunnel-error",
-                serde_json::json!({ "id": id, "error": msg }),
-            );
-        });
-    })
+    counter: Option<Arc<std::sync::atomic::AtomicU64>>,
+) -> Result<crate::tunnels::RunningTunnel, String> {
+    restore::spawn(
+        app,
+        live.session.handle.clone(),
+        live.tunnel_errors.clone(),
+        spec,
+        counter,
+    )
     .await
-    .map_err(anyhow_err)
 }
 
 #[tauri::command]
@@ -346,6 +355,7 @@ pub async fn session_statuses(state: State<'_, AppState>) -> Result<Vec<SessionS
             None => SessionStatus {
                 profile_id: profile.id.clone(),
                 connected: false,
+                degraded: false,
                 server_fingerprint: None,
                 first_contact: false,
                 tunnels: Vec::new(),
@@ -488,7 +498,10 @@ pub async fn start_tunnel(
             .clone()
     };
 
-    let running = {
+    // Snapshot what the forward needs and let go of the lock before binding, so
+    // starting a tunnel never holds up the rest of the app — the restore sweep
+    // included.
+    let (handle, errors, counter) = {
         let inner = state.inner.lock().await;
         let live = inner
             .sessions
@@ -497,13 +510,33 @@ pub async fn start_tunnel(
         if live.tunnels.get(&tunnel_id).map(|t| t.is_alive()) == Some(true) {
             return Err("that tunnel is already running".into());
         }
-        spawn_tunnel(&app, live, spec).await?
+        (
+            live.session.handle.clone(),
+            live.tunnel_errors.clone(),
+            // Carry the count forward when this is a dead forward being
+            // started again rather than a brand new one.
+            live.tunnels.get(&tunnel_id).map(|t| t.connections.clone()),
+        )
     };
+    let running = restore::spawn(&app, handle, errors, spec, counter).await?;
 
     {
         let mut inner = state.inner.lock().await;
         if let Some(live) = inner.sessions.get_mut(&profile_id) {
+            if live.tunnels.get(&tunnel_id).is_some_and(|t| t.is_alive()) {
+                // Something else brought it up while we were binding; ours
+                // cannot have won the port, but stop it all the same.
+                running.stop();
+                return Err("that tunnel is already running".into());
+            }
+            if let Some(old) = live.tunnels.remove(&tunnel_id) {
+                old.stop();
+            }
             live.tunnel_errors.lock().await.remove(&tunnel_id);
+            // Switching a forward on is what marks it as wanted, which is what
+            // lets the supervisor tell a tunnel that broke from one the user
+            // turned off.
+            live.desired.insert(tunnel_id.clone());
             live.tunnels.insert(tunnel_id, running);
         } else {
             running.stop();
@@ -532,9 +565,44 @@ pub async fn stop_tunnel(
             t.stop();
         }
         live.tunnel_errors.lock().await.remove(&tunnel_id);
+        // No longer wanted, so the supervisor leaves it alone. Its restore
+        // history goes too: the next time the user starts it, the lamp should
+        // describe that run and not the last one.
+        live.desired.remove(&tunnel_id);
+        live.restores.remove(&tunnel_id);
     }
     emit_status(&app, &state, &profile_id).await;
     Ok(())
+}
+
+/// Check this connection now and rebuild whatever has stopped working, rather
+/// than waiting for the next sweep.
+///
+/// Exposed because the supervisor's timer is deliberately unhurried, and a user
+/// who is already staring at a page that will not load should not have to wait
+/// out an interval chosen to be gentle on the server.
+#[tauri::command]
+pub async fn restore_tunnels(
+    app: AppHandle,
+    state: State<'_, AppState>,
+    profile_id: String,
+) -> Result<(), String> {
+    if !state.inner.lock().await.sessions.contains_key(&profile_id) {
+        return Err("that connection is not open".into());
+    }
+    restore::sweep_now(&app, &profile_id).await;
+    Ok(())
+}
+
+/// Turn the tunnel supervisor on or off.
+#[tauri::command]
+pub async fn set_auto_restore_tunnels(
+    state: State<'_, AppState>,
+    enabled: bool,
+) -> Result<(), String> {
+    let mut inner = state.inner.lock().await;
+    inner.settings.auto_restore_tunnels = enabled;
+    store::save_settings(&inner.settings).map_err(err)
 }
 
 // ----------------------------------------------------------------- about

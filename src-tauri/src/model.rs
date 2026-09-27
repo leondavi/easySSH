@@ -98,6 +98,24 @@ impl Profile {
     }
 }
 
+/// How a tunnel's automatic restore has gone, for the restore lamp.
+///
+/// Three states rather than a boolean: "it has never needed putting back" and
+/// "it was put back and is fine now" both mean the tunnel works, but only the
+/// second is worth the user knowing about, because a link that keeps dropping
+/// is a different problem from one that never has.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize)]
+#[serde(rename_all = "lowercase")]
+pub enum RestoreState {
+    /// Never broken since the session opened — the green lamp.
+    #[default]
+    Never,
+    /// Broken and put back automatically — the yellow lamp.
+    Restored,
+    /// Broken and could not be put back — the red lamp.
+    Failed,
+}
+
 /// Live status of one tunnel, pushed to the UI.
 #[derive(Debug, Clone, Serialize)]
 pub struct TunnelStatus {
@@ -107,6 +125,16 @@ pub struct TunnelStatus {
     /// Number of connections proxied since the tunnel started.
     pub connections: u64,
     pub error: Option<String>,
+    /// Whether this forward has ever had to be rebuilt under the user, and
+    /// whether the last attempt worked.
+    pub restore: RestoreState,
+    /// How many times it has been rebuilt since the session opened.
+    pub restores: u32,
+    /// Unix seconds of the last restore attempt, successful or not.
+    pub restored_at: Option<u64>,
+    /// What happened last time — "the connection dropped and was rebuilt", or
+    /// why it could not be.
+    pub restore_note: Option<String>,
 }
 
 /// Live status of one session, pushed to the UI.
@@ -114,6 +142,10 @@ pub struct TunnelStatus {
 pub struct SessionStatus {
     pub profile_id: String,
     pub connected: bool,
+    /// True when the session is open in easySSH's books but its SSH transport
+    /// has stopped carrying traffic and has not yet been replaced. Shown so the
+    /// user is not left staring at a green lamp beside a browser that hangs.
+    pub degraded: bool,
     /// SHA256 fingerprint of the server host key.
     pub server_fingerprint: Option<String>,
     /// True when this host was not in known_hosts and we have just recorded it.
@@ -224,6 +256,12 @@ pub struct Settings {
     /// connections easySSH owns. Off leaves only easySSH's own list.
     #[serde(default = "yes")]
     pub show_config_hosts: bool,
+    /// Whether easySSH watches its own forwards and rebuilds the ones that
+    /// have stopped carrying traffic. On by default: a dead forward is
+    /// indistinguishable from a slow server in the browser, so leaving it to
+    /// the user to notice is the behaviour this setting exists to replace.
+    #[serde(default = "yes")]
+    pub auto_restore_tunnels: bool,
 }
 
 /// `serde` needs a function to default a `bool` to true.
@@ -236,6 +274,7 @@ impl Default for Settings {
         Self {
             ssh_dir: None,
             show_config_hosts: true,
+            auto_restore_tunnels: true,
         }
     }
 }

@@ -194,8 +194,29 @@ pub async fn connect_password(
     password: &str,
     known_hosts: &Path,
 ) -> Result<Session> {
-    let (mut handle, fingerprint, first_contact) =
-        open(host, port, known_hosts, HostKeyPolicy::LearnUnknown).await?;
+    connect_password_with(
+        host,
+        port,
+        username,
+        password,
+        known_hosts,
+        HostKeyPolicy::LearnUnknown,
+    )
+    .await
+}
+
+/// As `connect_password`, with an explicit host key policy. The key is checked
+/// during the handshake, before the password is sent, so `RequireKnown` means
+/// an unknown host never sees it.
+pub async fn connect_password_with(
+    host: &str,
+    port: u16,
+    username: &str,
+    password: &str,
+    known_hosts: &Path,
+    policy: HostKeyPolicy,
+) -> Result<Session> {
+    let (mut handle, fingerprint, first_contact) = open(host, port, known_hosts, policy).await?;
 
     let result = handle
         .authenticate_password(username, password)
@@ -275,15 +296,28 @@ pub async fn connect_profile(
     secret: Option<&str>,
     known_hosts: &Path,
 ) -> Result<Session> {
+    connect_profile_with(profile, secret, known_hosts, HostKeyPolicy::LearnUnknown).await
+}
+
+/// As `connect_profile`, with an explicit host key policy. Reconnects nobody is
+/// watching use `RequireKnown`, so a secret is never handed to a host the user
+/// has not seen.
+pub async fn connect_profile_with(
+    profile: &Profile,
+    secret: Option<&str>,
+    known_hosts: &Path,
+    policy: HostKeyPolicy,
+) -> Result<Session> {
     match profile.auth {
         AuthMethod::Password => {
             let password = secret.ok_or_else(|| anyhow!("a password is required"))?;
-            connect_password(
+            connect_password_with(
                 &profile.host,
                 profile.port,
                 &profile.username,
                 password,
                 known_hosts,
+                policy,
             )
             .await
         }
@@ -299,7 +333,7 @@ pub async fn connect_profile(
                 Path::new(path),
                 secret.filter(|s| !s.is_empty()),
                 known_hosts,
-                HostKeyPolicy::LearnUnknown,
+                policy,
             )
             .await
         }
@@ -460,10 +494,71 @@ pub async fn describe_remote(handle: &Handle<Client>) -> String {
     }
 }
 
+/// How long a health probe waits for the server to open a channel. A forward
+/// that takes longer than this is already useless to a browser.
+const HEALTH_TIMEOUT: Duration = Duration::from_secs(8);
+
+/// Is this session still able to carry a forward?
+///
+/// `is_closed` alone is not enough. It reports a transport whose task has
+/// already exited, and a session can stop carrying traffic long before that:
+/// after the laptop sleeps, or a NAT table drops the flow, the socket lingers
+/// half-open, russh has noticed nothing, and every channel opened on it hangs
+/// instead of failing. That is exactly the state in which easySSH's tunnels
+/// look alive in the UI while the browser gets nothing — the bug this exists
+/// to detect. Opening one real channel and closing it is the only check that
+/// distinguishes the two, so that is what this does.
+pub async fn healthy(handle: &Handle<Client>) -> bool {
+    healthy_within(handle, HEALTH_TIMEOUT).await
+}
+
+/// `healthy` with an explicit deadline, so tests need not wait out the one the
+/// app uses.
+pub async fn healthy_within(handle: &Handle<Client>, patience: Duration) -> bool {
+    if handle.is_closed() {
+        return false;
+    }
+    match tokio::time::timeout(patience, handle.channel_open_session()).await {
+        Ok(Ok(channel)) => {
+            // Close it politely; a server that refuses is still reachable, and
+            // the channel would be dropped anyway.
+            let _ = channel.close().await;
+            true
+        }
+        // The server said no. That is still an answer, and an answer can only
+        // arrive over a working transport: a host that refuses session
+        // channels — a forced command, a restricted account, `MaxSessions`
+        // reached — while forwarding happily is healthy for our purposes, and
+        // tearing it down every sweep would break exactly the tunnels we are
+        // trying to keep.
+        Ok(Err(russh::Error::ChannelOpenFailure(reason))) => {
+            log::debug!("session health probe refused ({reason:?}); the session is alive");
+            true
+        }
+        Ok(Err(e)) => {
+            log::debug!("session health probe failed: {e}");
+            false
+        }
+        Err(_) => {
+            log::debug!("session health probe timed out after {patience:?}");
+            false
+        }
+    }
+}
+
+/// Hang up, without waiting indefinitely on a connection that may be wedged.
+///
+/// The bound matters because this is called on connections already known to be
+/// broken — a session being replaced after it stopped relaying. A polite
+/// goodbye down a socket nothing is reading must not hold up the caller.
 pub async fn disconnect(handle: &Handle<Client>) {
-    let _ = handle
-        .disconnect(Disconnect::ByApplication, "easySSH closing", "en")
-        .await;
+    let goodbye = handle.disconnect(Disconnect::ByApplication, "easySSH closing", "en");
+    if tokio::time::timeout(Duration::from_secs(5), goodbye)
+        .await
+        .is_err()
+    {
+        log::debug!("gave up waiting for a disconnect to be acknowledged");
+    }
 }
 
 #[cfg(test)]
@@ -585,6 +680,62 @@ mod tests {
         let body = std::fs::read_to_string(home.join(".ssh/authorized_keys")).unwrap();
         assert!(body.contains(first), "the existing key was clobbered");
         assert!(body.contains(second));
+    }
+
+    /// Patience short enough to keep the suite quick; the app's own is longer.
+    const TEST_PATIENCE: Duration = Duration::from_millis(600);
+
+    /// The check the whole tunnel supervisor rests on, in the failure mode that
+    /// matters most: the connection is silently going nowhere.
+    ///
+    /// This is the case `is_closed` alone gets wrong, and getting it wrong is
+    /// what left easySSH's tunnels looking alive while the browser hung.
+    #[tokio::test]
+    async fn a_session_that_has_gone_silent_is_not_healthy() {
+        let net = harness::start_cuttable().await;
+        let kh = harness::known_hosts("health-silent");
+
+        let session = connect_password("127.0.0.1", net.port, "someone", harness::PASSWORD, &kh)
+            .await
+            .expect("connect");
+        assert!(
+            healthy_within(&session.handle, TEST_PATIENCE).await,
+            "a freshly connected session must be healthy"
+        );
+
+        net.blackhole();
+
+        assert!(
+            !session.handle.is_closed(),
+            "this test is only meaningful while russh still believes the \
+             session is open — that is the whole point of probing it"
+        );
+        assert!(
+            !healthy_within(&session.handle, TEST_PATIENCE).await,
+            "a session that relays nothing was reported healthy"
+        );
+    }
+
+    /// The easier half: the transport was reset, so russh knows.
+    #[tokio::test]
+    async fn a_session_whose_transport_was_reset_is_not_healthy() {
+        let net = harness::start_cuttable().await;
+        let kh = harness::known_hosts("health-reset");
+
+        let session = connect_password("127.0.0.1", net.port, "someone", harness::PASSWORD, &kh)
+            .await
+            .expect("connect");
+        assert!(healthy_within(&session.handle, TEST_PATIENCE).await);
+
+        net.cut();
+
+        for _ in 0..40 {
+            if !healthy_within(&session.handle, TEST_PATIENCE).await {
+                return;
+            }
+            tokio::time::sleep(Duration::from_millis(100)).await;
+        }
+        panic!("a session whose transport was reset was still reported healthy");
     }
 
     #[tokio::test]
