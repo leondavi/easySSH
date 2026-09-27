@@ -144,7 +144,11 @@ async fn probe_batch(batch: &[(String, String, u16)]) -> Vec<(String, bool)> {
     out
 }
 
-/// Test whether the configured key still logs in, for hosts that are due.
+/// Test whether a key logs in without a password, for hosts that are due.
+///
+/// Covers connections set to use a password too: when a key on this machine
+/// already gets in, the connection is switched to it and counts as set up, so
+/// the user is never asked to install a key the server already trusts.
 ///
 /// Skipped entirely while a session is open — that connection already proves
 /// the answer, and a redundant handshake would only add noise to the server's
@@ -156,13 +160,13 @@ fn watch_key_auth(app: AppHandle) {
             let now = std::time::Instant::now();
             let state = app.state::<AppState>();
 
-            let (due, known_hosts) = {
+            let (due, ssh_dir, known_hosts) = {
                 let inner = state.inner.lock().await;
-                let known_hosts = knownhosts::path_for(&inner.ssh_dir());
+                let ssh_dir = inner.ssh_dir();
+                let known_hosts = knownhosts::path_for(&ssh_dir);
                 let due: Vec<Profile> = inner
                     .profiles
                     .iter()
-                    .filter(|p| p.auth == model::AuthMethod::Key && p.key_path.is_some())
                     .filter(|p| !inner.sessions.contains_key(&p.id))
                     .filter(|p| {
                         // Do not waste a handshake on a host we just found down.
@@ -182,7 +186,7 @@ fn watch_key_auth(app: AppHandle) {
                     })
                     .cloned()
                     .collect();
-                (due, known_hosts)
+                (due, ssh_dir, known_hosts)
             };
 
             if due.is_empty() {
@@ -190,32 +194,54 @@ fn watch_key_auth(app: AppHandle) {
             }
 
             for profile in due {
-                let outcome = probe::key_auth(&profile, &known_hosts).await;
+                // `RequireKnown`: nobody is watching, so a host that has never
+                // been connected to is left for the user to meet first.
+                let outcome = probe::key_auth(
+                    &profile,
+                    &ssh_dir,
+                    &known_hosts,
+                    ssh::HostKeyPolicy::RequireKnown,
+                )
+                .await;
 
                 let mut inner = state.inner.lock().await;
-                let record = inner.probes.entry(profile.id.clone()).or_default();
-                record.status.profile_id = profile.id.clone();
-                record.status.key_auth_at = Some(store::now());
-
+                let mut switched = false;
                 match outcome {
-                    probe::KeyAuth::Works => {
-                        record.status.key_auth = Some(true);
-                        record.status.key_auth_note = None;
-                        record.failures = 0;
+                    probe::KeyAuth::Works(path) => {
+                        switched = inner.record_working_key(&profile.id, &path.to_string_lossy());
                     }
                     probe::KeyAuth::Refused(why) => {
+                        let record = inner.probes.entry(profile.id.clone()).or_default();
+                        record.status.profile_id = profile.id.clone();
+                        record.status.key_auth_at = Some(store::now());
                         record.status.key_auth = Some(false);
                         record.status.key_auth_note = Some(why);
+                        record.status.passwordless_key = None;
                         record.failures = record.failures.saturating_add(1);
                     }
                     probe::KeyAuth::Unknown(why) => {
+                        let record = inner.probes.entry(profile.id.clone()).or_default();
+                        record.status.profile_id = profile.id.clone();
+                        record.status.key_auth_at = Some(store::now());
                         record.status.key_auth = None;
                         record.status.key_auth_note = Some(why);
                     }
                 }
-                record.next_key_check =
-                    Some(std::time::Instant::now() + probe::backoff(record.failures));
+                if let Some(record) = inner.probes.get_mut(&profile.id) {
+                    record.next_key_check =
+                        Some(std::time::Instant::now() + probe::backoff(record.failures));
+                }
                 drop(inner);
+
+                if switched {
+                    // Said out loud: the connection's login method just changed
+                    // without the user touching it.
+                    let _ = app.emit("profiles-changed", ());
+                    let _ = app.emit(
+                        "passwordless-found",
+                        serde_json::json!({ "profile_id": profile.id, "name": profile.name }),
+                    );
+                }
 
                 // Publish after each host rather than after the whole sweep: on
                 // first run every connection is due at once, and a handshake per
@@ -324,6 +350,7 @@ fn main() {
             commands::set_show_config_hosts,
             commands::app_version,
             commands::restore_tunnels,
+            commands::detect_passwordless,
             commands::set_auto_restore_tunnels,
         ])
         .setup(|app| {

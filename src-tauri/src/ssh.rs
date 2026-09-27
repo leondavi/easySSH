@@ -290,6 +290,60 @@ pub async fn connect_key(
     Ok(finish(handle, fingerprint, first_contact))
 }
 
+/// The most keys offered in one discovery attempt.
+///
+/// `sshd` drops a client after `MaxAuthTries` failures (6 by default), and
+/// every failed offer counts towards it and lands in the server's auth log.
+/// Staying under the limit keeps discovery from ever looking like an attack.
+pub const MAX_KEYS_OFFERED: usize = 5;
+
+/// Find a key on this machine that already logs in to a host, without a
+/// password.
+///
+/// Every candidate is offered on one connection, in order, the way `ssh`
+/// itself tries the keys it knows about, rather than one handshake per key.
+/// Keys that need a passphrase cannot be tried unattended and are skipped.
+/// Returns the key that worked and the session it opened, or `None` when the
+/// server turned every candidate down.
+pub async fn find_working_key(
+    host: &str,
+    port: u16,
+    username: &str,
+    candidates: &[std::path::PathBuf],
+    known_hosts: &Path,
+    policy: HostKeyPolicy,
+) -> Result<Option<(std::path::PathBuf, Session)>> {
+    let loaded: Vec<(std::path::PathBuf, russh::keys::PrivateKey)> = candidates
+        .iter()
+        .filter_map(|p| load_secret_key(p, None).ok().map(|k| (p.clone(), k)))
+        .take(MAX_KEYS_OFFERED)
+        .collect();
+    if loaded.is_empty() {
+        return Ok(None);
+    }
+
+    let (mut handle, fingerprint, first_contact) = open(host, port, known_hosts, policy).await?;
+    let hash_alg = handle.best_supported_rsa_hash().await?.flatten();
+
+    for (path, key) in loaded {
+        let result = handle
+            .authenticate_publickey(
+                username,
+                PrivateKeyWithHashAlg::new(Arc::new(key), hash_alg),
+            )
+            .await
+            .context("public key authentication failed")?;
+        if result.success() {
+            return Ok(Some((path, finish(handle, fingerprint, first_contact))));
+        }
+    }
+
+    let _ = handle
+        .disconnect(Disconnect::ByApplication, "easySSH closing", "en")
+        .await;
+    Ok(None)
+}
+
 /// Connect a profile, taking the secret the UI collected for it.
 pub async fn connect_profile(
     profile: &Profile,

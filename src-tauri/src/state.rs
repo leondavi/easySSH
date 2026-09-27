@@ -287,6 +287,47 @@ impl Inner {
         }
     }
 
+    /// Record that `key_path` logs in to a connection without a password, and
+    /// make the connection use it.
+    ///
+    /// This is what makes "Set Up" unnecessary for a server that already
+    /// trusts a key on this machine: the connection switches to that key and
+    /// counts as set up, exactly as if easySSH had installed it. Returns true
+    /// when anything the UI shows changed.
+    ///
+    /// A connection derived from the ssh config is updated in memory only.
+    /// Writing it out would take it over from the config, which only an
+    /// explicit edit is allowed to do.
+    pub fn record_working_key(&mut self, profile_id: &str, key_path: &str) -> bool {
+        let record = self.probes.entry(profile_id.to_string()).or_default();
+        record.status.profile_id = profile_id.to_string();
+        record.status.key_auth = Some(true);
+        record.status.key_auth_note = None;
+        record.status.key_auth_at = Some(crate::store::now());
+        record.status.passwordless_key = Some(key_path.to_string());
+        record.failures = 0;
+
+        let Some(p) = self.profile_mut(profile_id) else {
+            return false;
+        };
+        let already = p.auth == crate::model::AuthMethod::Key
+            && p.key_path.as_deref() == Some(key_path)
+            && p.key_installed;
+        if already {
+            return false;
+        }
+        p.auth = crate::model::AuthMethod::Key;
+        p.key_path = Some(key_path.to_string());
+        p.key_installed = true;
+        let owned = !p.from_config;
+        if owned {
+            if let Err(e) = self.persist() {
+                log::warn!("could not save the discovered key for {profile_id}: {e}");
+            }
+        }
+        true
+    }
+
     /// Mark a connection as the user's own, so it persists independently of
     /// the ssh config. Only an explicit edit does this — see `customized`.
     pub fn adopt(&mut self, id: &str) {
@@ -344,6 +385,44 @@ impl AppState {
 mod tests {
     use super::*;
     use crate::model::{AuthMethod, Settings};
+
+    /// A password connection whose server already trusts a key is switched to
+    /// that key and counts as set up — and it is saved, so it sticks.
+    #[test]
+    fn a_working_key_switches_an_owned_connection_and_is_saved() {
+        let dir = config_dir("working-owned", "");
+        let mut inner = inner_for(&dir, vec![saved("Mine", "10.0.0.5", 22)]);
+        let id = inner.profiles[0].id.clone();
+
+        assert!(inner.record_working_key(&id, "/keys/id_ed25519"));
+        let p = inner.profile(&id).unwrap();
+        assert_eq!(p.auth, AuthMethod::Key);
+        assert_eq!(p.key_path.as_deref(), Some("/keys/id_ed25519"));
+        assert!(p.key_installed, "it should count as set up");
+        assert_eq!(inner.probes[&id].status.key_auth, Some(true));
+
+        let saved = std::fs::read_to_string(crate::ezconfig::path_for(&dir)).unwrap();
+        assert!(saved.contains("/keys/id_ed25519"), "not saved:\n{saved}");
+
+        // Seeing it again is not news.
+        assert!(!inner.record_working_key(&id, "/keys/id_ed25519"));
+    }
+
+    /// A host from the ssh config is updated in memory only: writing it out
+    /// would take it over from the config without the user editing it.
+    #[test]
+    fn a_working_key_does_not_take_over_a_config_host() {
+        let dir = config_dir("working-config", "Host web\n  HostName 10.0.0.5\n");
+        let mut inner = inner_for(&dir, Vec::new());
+        inner.sync_config_profiles();
+        let id = inner.profiles[0].id.clone();
+
+        assert!(inner.record_working_key(&id, "/keys/id_ed25519"));
+        assert!(inner.profile(&id).unwrap().key_installed);
+        assert!(inner.profile(&id).unwrap().from_config, "it was adopted");
+        let saved = std::fs::read_to_string(crate::ezconfig::path_for(&dir)).unwrap_or_default();
+        assert!(!saved.contains("10.0.0.5"), "a config host was written out");
+    }
 
     /// The three lamp colours the user asked for, in the order they happen.
     #[test]

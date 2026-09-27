@@ -799,6 +799,36 @@ function secretSheet(p, isPassphrase) {
 
 /* first-run key install */
 
+/** Set Up, unless the server already lets a key on this machine in.
+ *  Asking for a password to install a key the server already trusts would be
+ *  a pointless round-trip, so look first. Running it again on a connection
+ *  that is already set up goes straight to the sheet: that is how a
+ *  different key gets installed. */
+async function setupPasswordless(p) {
+  if (!p.key_installed) {
+    const btn = $("setup-btn");
+    const was = btn.textContent;
+    btn.disabled = true;
+    btn.textContent = "Checking…";
+    let found = null;
+    try {
+      found = await invoke("detect_passwordless", { profileId: p.id });
+    } catch { /* fall through to the sheet, which reports errors properly */ }
+    finally {
+      btn.disabled = false;
+      btn.textContent = was;
+    }
+    if (found) {
+      await reloadKeys();
+      await reloadProbes();
+      await reloadProfiles();
+      toast(`Passwordless login already works with ${basename(found)} — nothing to set up`, "success", 7000);
+      return;
+    }
+  }
+  setupSheet(p);
+}
+
 function setupSheet(p) {
   sheet((host, close) => {
     const pw = h("input", { type: "password", autocomplete: "off", placeholder: "Password" });
@@ -834,7 +864,9 @@ function setupSheet(p) {
       });
       await reloadKeys();
       await reloadProfiles();
-      note.textContent = result.already_present
+      note.textContent = result.already_worked
+        ? `${p.host} already accepts that key, so nothing was installed and your password was not used.`
+        : result.already_present
         ? `That key was already in authorized_keys on ${p.host}. Key login verified.`
         : `Key installed on ${p.host} and verified. Future connections will not ask for a password.`;
       note.hidden = false;
@@ -1566,7 +1598,7 @@ $("show-config-hosts").addEventListener("change", async (e) => {
   renderSidebar();
   renderLocationPicker();
 });
-$("setup-btn").addEventListener("click", () => selected() && setupSheet(selected()));
+$("setup-btn").addEventListener("click", () => selected() && setupPasswordless(selected()));
 $("add-tunnel").addEventListener("click", () => selected() && tunnelSheet(selected(), null));
 
 /* Test the connection and rebuild whatever has stopped working, now rather
@@ -1665,6 +1697,13 @@ listen("probe-status", (e) => {
 });
 
 listen("tunnel-error", (e) => fail(e.payload.error));
+
+/* The background check found a key that already logs in, and switched the
+   connection to it. Said out loud because its login method changed without
+   the user doing anything. */
+listen("passwordless-found", (e) => {
+  toast(`${e.payload.name}: passwordless login already works — switched to key login`, "success", 7000);
+});
 
 /* A connection dropped and easySSH put it back. Worth saying out loud: the
    user may well be looking at a page that failed a moment ago and needs to

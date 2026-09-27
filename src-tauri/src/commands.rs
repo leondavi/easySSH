@@ -299,12 +299,21 @@ pub async fn connect(
     if let Some(p) = inner.profile_mut(&profile_id) {
         p.last_connected = Some(store::now());
     }
+    // A session opened with a key is proof that passwordless login works, so a
+    // connection whose key easySSH did not install itself counts as set up.
+    let proven = match (profile.auth, profile.key_path.as_deref()) {
+        (AuthMethod::Key, Some(k)) => inner.record_working_key(&profile_id, k),
+        _ => false,
+    };
     let _ = inner.persist();
 
     let status = live.status(&profile).await;
     inner.sessions.insert(profile_id, live);
     drop(inner);
 
+    if proven {
+        let _ = app.emit("profiles-changed", ());
+    }
     let _ = app.emit("session-status", status.clone());
     Ok(status)
 }
@@ -381,6 +390,55 @@ pub async fn remote_description(
 
 // ------------------------------------------------------- first-run key setup
 
+/// Find out whether this connection already logs in without a password,
+/// before asking the user for one.
+///
+/// Offers the connection's own key and then the other keys in the `.ssh`
+/// directory. When one works, the connection is switched to it and marked as
+/// set up, and its path is returned; `None` means the user does need to run
+/// Set Up. Trusts a host on first use, like connecting does: the user asked.
+#[tauri::command]
+pub async fn detect_passwordless(
+    app: AppHandle,
+    state: State<'_, AppState>,
+    profile_id: String,
+) -> Result<Option<String>, String> {
+    let (profile, ssh_dir) = {
+        let inner = state.inner.lock().await;
+        let profile = inner
+            .profile(&profile_id)
+            .ok_or("that connection no longer exists")?
+            .clone();
+        (profile, inner.ssh_dir())
+    };
+    let known_hosts = knownhosts::path_for(&ssh_dir);
+
+    match crate::probe::key_auth(
+        &profile,
+        &ssh_dir,
+        &known_hosts,
+        ssh::HostKeyPolicy::LearnUnknown,
+    )
+    .await
+    {
+        crate::probe::KeyAuth::Works(path) => {
+            let path = path.to_string_lossy().to_string();
+            let changed = state
+                .inner
+                .lock()
+                .await
+                .record_working_key(&profile_id, &path);
+            if changed {
+                let _ = app.emit("profiles-changed", ());
+            }
+            Ok(Some(path))
+        }
+        // "No key works" and "could not tell" both mean: go ahead with Set Up.
+        // A host that is down will fail there with a clearer message.
+        _ => Ok(None),
+    }
+}
+
 /// The headline flow: connect with a password, put our public key on the
 /// remote, and flip the profile over to key authentication.
 #[tauri::command]
@@ -411,6 +469,40 @@ pub async fn setup_key_auth(
     };
     tidy_key(&app, &key.path);
     let public_key = keys::authorized_keys_line(Path::new(&key.path)).map_err(anyhow_err)?;
+
+    // The server may already accept this key. Then there is nothing to install
+    // and no reason to have used the password at all.
+    if !key.encrypted {
+        let probe = ssh::find_working_key(
+            &profile.host,
+            profile.port,
+            &profile.username,
+            &[std::path::PathBuf::from(&key.path)],
+            &known_hosts,
+            ssh::HostKeyPolicy::LearnUnknown,
+        )
+        .await;
+        if let Ok(Some((_, session))) = probe {
+            ssh::disconnect(&session.handle).await;
+            // Same outcome as a completed Set Up, including taking the
+            // connection over from the ssh config: the user asked for this.
+            let mut inner = state.inner.lock().await;
+            inner.adopt(&profile_id);
+            inner.record_working_key(&profile_id, &key.path);
+            inner.persist().map_err(err)?;
+            drop(inner);
+            let _ = app.emit("profiles-changed", ());
+            return Ok(SetupResult {
+                installed: true,
+                already_present: true,
+                already_worked: true,
+                key_path: key.path,
+                public_key,
+                server_fingerprint: session.fingerprint,
+                remote_message: String::new(),
+            });
+        }
+    }
 
     let session = ssh::connect_password(
         &profile.host,
@@ -470,6 +562,7 @@ pub async fn setup_key_auth(
     Ok(SetupResult {
         installed: true,
         already_present,
+        already_worked: false,
         key_path: key.path,
         public_key,
         server_fingerprint: session.fingerprint,

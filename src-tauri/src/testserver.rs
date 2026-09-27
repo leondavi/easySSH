@@ -21,6 +21,9 @@ pub struct Server {
     /// When set, exec requests really run under `sh` with `HOME` bound
     /// to this directory instead of being echoed.
     shell: Option<std::path::PathBuf>,
+    /// The one public key this server lets in, standing in for its
+    /// `authorized_keys`. `None` refuses every key.
+    accept_key: Option<ssh_key::PublicKey>,
 }
 
 impl Handler for Server {
@@ -35,6 +38,25 @@ impl Handler for Server {
                 partial_success: false,
             })
         }
+    }
+
+    async fn auth_publickey(
+        &mut self,
+        _user: &str,
+        public_key: &ssh_key::PublicKey,
+    ) -> Result<Auth, Self::Error> {
+        let trusted = self
+            .accept_key
+            .as_ref()
+            .is_some_and(|k| k.key_data() == public_key.key_data());
+        Ok(if trusted {
+            Auth::Accept
+        } else {
+            Auth::Reject {
+                proceed_with_methods: None,
+                partial_success: false,
+            }
+        })
     }
 
     async fn channel_open_session(
@@ -134,6 +156,45 @@ impl Handler for Server {
 /// Start an echoing server on an ephemeral port.
 pub async fn start() -> u16 {
     start_with(None).await
+}
+
+/// A server that trusts exactly one public key, and counts the connections
+/// made to it — so a test can prove a set of keys was offered over one.
+pub struct KeyServer {
+    pub port: u16,
+    pub connections: Arc<std::sync::atomic::AtomicUsize>,
+}
+
+pub async fn start_trusting(key: ssh_key::PublicKey) -> KeyServer {
+    let host_key = ssh_key::PrivateKey::random(&mut rand::rng(), ssh_key::Algorithm::Ed25519)
+        .expect("host key");
+    let config = Arc::new(russh::server::Config {
+        keys: vec![host_key],
+        ..Default::default()
+    });
+    let listener = TcpListener::bind("127.0.0.1:0").await.expect("bind");
+    let port = listener.local_addr().unwrap().port();
+    let connections: Arc<std::sync::atomic::AtomicUsize> = Arc::default();
+    let count = connections.clone();
+
+    tokio::spawn(async move {
+        while let Ok((stream, _)) = listener.accept().await {
+            count.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+            let config = config.clone();
+            let key = key.clone();
+            tokio::spawn(async move {
+                let handler = Server {
+                    accept_key: Some(key),
+                    ..Default::default()
+                };
+                if let Ok(session) = russh::server::run_stream(config, stream, handler).await {
+                    let _ = session.await;
+                }
+            });
+        }
+    });
+
+    KeyServer { port, connections }
 }
 
 /// A test server reached through a proxy the test can cut, so a connected

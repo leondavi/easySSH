@@ -159,6 +159,9 @@ pub struct SetupResult {
     pub installed: bool,
     /// True when the key was already present in authorized_keys.
     pub already_present: bool,
+    /// True when the key already logged in before anything was installed, so
+    /// the password was never sent.
+    pub already_worked: bool,
     pub key_path: String,
     pub public_key: String,
     pub server_fingerprint: String,
@@ -335,4 +338,7 @@ pub struct ProbeStatus {
     pub key_auth_at: Option<u64>,
     /// Why `key_auth` is false, or why it could not be determined.
     pub key_auth_note: Option<String>,
+    /// The key found to log in without a password, when one did — which may
+    /// not be the one the connection was set to use.
+    pub passwordless_key: Option<String>,
 }
