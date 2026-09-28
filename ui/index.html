@@ -15,9 +15,14 @@
     <!-- The app's own title bar: the window has no OS one, and the header on
          the right belongs to whichever connection is selected. Right-aligned
          so it clears the macOS traffic lights sitting over this corner. -->
-    <div class="sidebar-top" data-tauri-drag-region>
-      <div class="brand-block" data-tauri-drag-region>
-        <span class="brand" data-tauri-drag-region>easySSH</span>
+    <div class="sidebar-top" data-tauri-drag-region></div>
+
+    <!-- The brand, on its own row below the traffic lights, big enough to be
+         recognised as the logo rather than read as one more icon. -->
+    <div class="brand-block" data-tauri-drag-region>
+      <img class="brand-logo" src="logo.png" alt="" data-tauri-drag-region />
+      <div class="brand-words" data-tauri-drag-region>
+        <span class="brand" data-tauri-drag-region>easy<span class="brand-ssh">SSH</span></span>
         <span class="brand-version mono" id="app-version" data-tauri-drag-region></span>
       </div>
     </div>
@@ -78,10 +83,7 @@
     <!-- empty state -->
     <section id="empty-state" class="empty-state">
       <div class="empty-art">
-        <svg viewBox="0 0 96 96" aria-hidden="true">
-          <rect x="8" y="16" width="80" height="64" rx="14"/>
-          <path d="M28 40l10 8-10 8M48 56h20" />
-        </svg>
+        <img src="logo.png" alt="easySSH" />
       </div>
       <h2>Connect to a server</h2>
       <p>Add a connection with your password once. easySSH installs your key so every login after that is instant — then opens a terminal or forwards the server's web apps to your browser.</p>
@@ -173,6 +175,104 @@
           easySSH checks for that and puts the connection back. The lamp beside each
           tunnel says whether it has ever had to: green never, yellow restored,
           red could not be.</p>
+      </div>
+
+      <div class="card" id="files-card">
+        <button class="card-head disclosure" id="files-toggle"
+                aria-expanded="false" aria-controls="files-body">
+          <span class="disclosure-chevron" aria-hidden="true">
+            <svg viewBox="0 0 16 16"><path d="M6 3.5 10.5 8 6 12.5"/></svg>
+          </span>
+          <h3>Files</h3>
+          <span id="files-summary" class="auth-summary">Send, fetch, or share by link</span>
+          <span id="files-badge" class="badge live" hidden>Link live</span>
+        </button>
+
+        <div id="files-body" class="disclosure-body">
+          <p id="files-offline" class="muted-row" hidden>Connect to send, fetch or share files with this server.</p>
+
+          <div class="segmented files-tabs" id="files-tabs" role="tablist">
+            <button data-tab="send" role="tab">Send</button>
+            <button data-tab="receive" role="tab">Fetch</button>
+            <button data-tab="share" role="tab">Share by Link</button>
+          </div>
+
+          <div class="files-pane" data-pane="send">
+            <div class="xfer-row">
+              <label>From</label>
+              <div class="path-chip mono empty" id="send-local">Choose a file or folder on this computer</div>
+              <button class="btn btn-small" id="send-pick-file">File…</button>
+              <button class="btn btn-small" id="send-pick-folder">Folder…</button>
+            </div>
+            <div class="xfer-row">
+              <label for="send-remote">To</label>
+              <input id="send-remote" type="text" class="mono" value="~" spellcheck="false" autocomplete="off" />
+              <button class="btn btn-small" id="send-browse">Browse…</button>
+            </div>
+            <div class="xfer-actions">
+              <p class="field-hint">Folders are compressed for the trip and unpacked on arrival. Anything with the same name there is replaced.</p>
+              <button class="btn btn-primary btn-small" id="send-go">Send</button>
+            </div>
+            <div class="progress" id="send-progress" hidden>
+              <div class="progress-track"><div class="progress-fill"></div></div>
+              <span class="progress-label"></span>
+            </div>
+          </div>
+
+          <div class="files-pane" data-pane="receive" hidden>
+            <div class="xfer-row">
+              <label for="recv-remote">From</label>
+              <input id="recv-remote" type="text" class="mono" placeholder="~/path/on/the/server" spellcheck="false" autocomplete="off" />
+              <button class="btn btn-small" id="recv-browse">Browse…</button>
+            </div>
+            <div class="xfer-row">
+              <label>Save to</label>
+              <div class="path-chip mono" id="recv-local"></div>
+              <button class="btn btn-small" id="recv-pick">Choose…</button>
+            </div>
+            <div class="xfer-actions">
+              <p class="field-hint">Folders arrive whole. Anything with the same name here is replaced.</p>
+              <button class="btn btn-primary btn-small" id="recv-go">Fetch</button>
+            </div>
+            <div class="progress" id="recv-progress" hidden>
+              <div class="progress-track"><div class="progress-fill"></div></div>
+              <span class="progress-label"></span>
+            </div>
+          </div>
+
+          <div class="files-pane" data-pane="share" hidden>
+            <div class="xfer-row">
+              <label>Share</label>
+              <div class="path-chip mono empty" id="share-local">Choose a file or folder to share</div>
+              <button class="btn btn-small" id="share-pick-file">File…</button>
+              <button class="btn btn-small" id="share-pick-folder">Folder…</button>
+            </div>
+            <div id="share-live" hidden>
+              <div class="share-head">
+                <div class="switch" id="share-switch" role="switch" aria-checked="false"></div>
+                <span class="share-state" id="share-state">Link off</span>
+                <span class="share-expiry" id="share-expiry"></span>
+              </div>
+              <div id="share-links">
+                <div class="copy-row live">
+                  <span class="copy-label">URL</span>
+                  <code class="mono copy-value" id="share-url"></code>
+                  <button class="btn btn-small" data-copy="share-url">Copy</button>
+                </div>
+                <div class="copy-row">
+                  <span class="copy-label">Fetch</span>
+                  <code class="mono copy-value" id="share-cmd"></code>
+                  <button class="btn btn-small" data-copy="share-cmd">Copy</button>
+                </div>
+              </div>
+              <div class="share-actions">
+                <button id="share-new-link" class="btn btn-plain btn-small">New Link</button>
+                <button id="share-stop" class="btn btn-plain btn-small btn-danger">Stop Sharing</button>
+              </div>
+            </div>
+            <p class="field-hint files-note">The link works on the server itself, at 127.0.0.1, travelling back through this connection — nothing is opened on your network. It changes every 15 minutes, and one file or folder can be shared per connection.</p>
+          </div>
+        </div>
       </div>
 
       <div class="card">

@@ -53,7 +53,24 @@ const state = {
   configHosts: [],      // Host blocks parsed from the focused config
   showConfigHosts: true, // list hosts read from the ssh config alongside our own
   autoRestore: true,    // watch live forwards and rebuild the ones that die
+  files: new Map(),     // profileId -> what the Files card has chosen so far
+  publish: new Map(),   // profileId -> what it is sharing by link, if anything
+  filesOpen: loadPref("filesOpen", false),  // Files card expanded
+  filesTab: loadPref("filesTab", "send"),
+  receiveDir: "",       // default folder for fetched files
 };
+
+/** A remembered UI preference. Storage can be unavailable; the UI must work
+ *  the same without it. */
+function loadPref(key, fallback) {
+  try {
+    const v = localStorage.getItem(`easyssh.${key}`);
+    return v === null ? fallback : JSON.parse(v);
+  } catch { return fallback; }
+}
+function savePref(key, value) {
+  try { localStorage.setItem(`easyssh.${key}`, JSON.stringify(value)); } catch { /* not persisted */ }
+}
 
 const selected = () => state.profiles.find((p) => p.id === state.selectedId) || null;
 const statusOf = (id) => state.statuses.get(id) || { connected: false, tunnels: [] };
@@ -423,6 +440,7 @@ function renderDetail() {
     : "Connect to run a command";
 
   renderTunnels(p, st);
+  renderFiles(p, st);
   refreshTerminalPreview(p);
 }
 
@@ -587,6 +605,7 @@ function select(id) {
   state.selectedId = id;
   renderSidebar();
   renderDetail();
+  if (id) loadPublish(id);
   if (id) invoke("remote_description", { profileId: id })
     .then((d) => { if (d) { state.descriptions.set(id, d); renderDetail(); } })
     .catch(() => {});
@@ -1682,10 +1701,367 @@ $("term-tunnels").addEventListener("change", () => {
   if (p) refreshTerminalPreview(p);
 });
 
+/* ── files: send, fetch, share by link ──────────────────────────────────── */
+
+/** What the Files card has chosen for one connection. Kept per connection,
+ *  so switching servers does not carry a destination over to the wrong one. */
+function filesOf(id) {
+  if (!state.files.has(id)) {
+    state.files.set(id, {
+      sendPath: null, sendKind: null, sendRemote: "~",
+      recvRemote: "", recvLocal: null,
+      busy: null, progress: { send: null, receive: null },
+    });
+  }
+  return state.files.get(id);
+}
+
+const ICON_DIR = '<svg viewBox="0 0 16 16"><path d="M1.5 4A1.5 1.5 0 0 1 3 2.5h3.1l1.6 1.6H13A1.5 1.5 0 0 1 14.5 5.6v6.9A1.5 1.5 0 0 1 13 14H3a1.5 1.5 0 0 1-1.5-1.5V4Z"/></svg>';
+const ICON_FILE = '<svg viewBox="0 0 16 16"><path d="M4.5 1.5h4.6L13 5.4v8.1a1.5 1.5 0 0 1-1.5 1.5h-7A1.5 1.5 0 0 1 3 13.5v-10.5A1.5 1.5 0 0 1 4.5 1.5Z"/></svg>';
+
+function fmtBytes(n) {
+  if (n == null) return "";
+  const units = ["B", "KB", "MB", "GB", "TB"];
+  let i = 0;
+  while (n >= 1024 && i < units.length - 1) { n /= 1024; i++; }
+  return `${n < 10 && i ? n.toFixed(1) : Math.round(n)} ${units[i]}`;
+}
+
+/** Show a chosen local path. The end of a path is the part that identifies
+ *  it, so it is the part kept in view when space runs out. */
+function setChip(el, path, kind, emptyText) {
+  el.classList.toggle("empty", !path);
+  el.title = path || "";
+  if (!path) { el.replaceChildren(emptyText); return; }
+  el.replaceChildren(
+    h("span", { class: "kind", text: kind === "folder" ? "DIR" : "FILE" }),
+    // LRM marks keep leading and trailing slashes in place inside the
+    // right-to-left box that does the start-side truncation.
+    h("span", { class: "path-text", text: `‎${path}‎` }));
+}
+
+/** Set an input's value unless the user is typing in it. */
+function syncInput(el, value) {
+  if (document.activeElement !== el) el.value = value;
+}
+
+function renderFiles(p, st) {
+  const f = filesOf(p.id);
+  const pub = state.publish.get(p.id);
+  const live = !!st.connected;
+
+  $("files-toggle").setAttribute("aria-expanded", String(state.filesOpen));
+  $("files-badge").hidden = !pub?.serving;
+  $("files-summary").textContent = state.filesOpen ? ""
+    : pub?.serving ? `Sharing ${pub.name}` : "Send, fetch, or share by link";
+
+  $("files-offline").hidden = live;
+  $("files-tabs").hidden = !live;
+  for (const b of $("files-tabs").children) {
+    b.setAttribute("aria-selected", String(b.dataset.tab === state.filesTab));
+  }
+  for (const pane of document.querySelectorAll(".files-pane")) {
+    pane.hidden = !live || pane.dataset.pane !== state.filesTab;
+  }
+  if (!live) return;
+
+  // Send.
+  setChip($("send-local"), f.sendPath, f.sendKind, "Choose a file or folder on this computer");
+  syncInput($("send-remote"), f.sendRemote);
+  $("send-go").disabled = !f.sendPath || !!f.busy;
+  showProgress("send-progress", f.progress.send);
+
+  // Fetch.
+  syncInput($("recv-remote"), f.recvRemote);
+  setChip($("recv-local"), f.recvLocal || state.receiveDir, "folder", "Choose a folder");
+  $("recv-go").disabled = !f.recvRemote.trim() || !!f.busy;
+  showProgress("recv-progress", f.progress.receive);
+
+  // Share by link.
+  setChip($("share-local"), pub?.path, pub?.is_dir ? "folder" : "file",
+          "Choose a file or folder to share");
+  $("share-live").hidden = !pub;
+  if (pub) {
+    $("share-switch").setAttribute("aria-checked", String(pub.serving));
+    $("share-state").textContent = pub.serving ? "Link on" : "Link off";
+    $("share-links").hidden = !pub.serving;
+    $("share-url").textContent = pub.url || "";
+    $("share-cmd").textContent = pub.fetch_command || "";
+    $("share-new-link").disabled = !pub.serving;
+  }
+  tickShare();
+}
+
+function showProgress(id, prog) {
+  const box = $(id);
+  if (!prog) { box.hidden = true; return; }
+  box.hidden = false;
+  const known = prog.total != null && prog.total > 0 && prog.phase === "sending";
+  box.classList.toggle("indeterminate", !known);
+  box.querySelector(".progress-fill").style.width =
+    known ? `${Math.min(100, (prog.done / prog.total) * 100).toFixed(1)}%` : "";
+  const label =
+      prog.phase === "packing"   ? "Compressing…"
+    : prog.phase === "sending"   ? `${fmtBytes(prog.done)} of ${fmtBytes(prog.total)}`
+    : prog.phase === "receiving" ? (prog.done ? `Received ${fmtBytes(prog.done)}` : "Packing on the server…")
+    : prog.phase === "unpacking" ? "Unpacking…"
+    : prog.phase;
+  box.querySelector(".progress-label").textContent = label;
+}
+
+/** Keep the link's countdown current. Runs every second, touching only the
+ *  one line of text, so the rest of the page is left alone. */
+function tickShare() {
+  const pub = state.publish.get(state.selectedId);
+  const el = $("share-expiry");
+  if (!pub?.serving) { el.textContent = ""; return; }
+  const left = Math.max(0, pub.expires_at - Math.floor(Date.now() / 1000));
+  const m = Math.floor(left / 60), s = String(left % 60).padStart(2, "0");
+  el.textContent = left ? `New link in ${m}:${s}` : "Renewing…";
+}
+setInterval(tickShare, 1000);
+
+async function pickLocal(kind, title, startIn) {
+  return invoke("pick_local_path", { kind, title, startIn: startIn || null });
+}
+
+async function runTransfer(p, direction) {
+  const f = filesOf(p.id);
+  if (f.busy) return;
+  f.busy = direction;
+  f.progress[direction] = { phase: direction === "send" ? "packing" : "receiving", done: 0, total: null };
+  renderDetail();
+  try {
+    const out = direction === "send"
+      ? await invoke("send_path", {
+          profileId: p.id, localPath: f.sendPath, remoteDir: f.sendRemote.trim() || "~",
+        })
+      : await invoke("receive_path", {
+          profileId: p.id, remotePath: f.recvRemote.trim(), localDir: f.recvLocal || state.receiveDir,
+        });
+    const what = out.names.join(", ");
+    toast(direction === "send"
+      ? `Sent ${what} to ${out.destination} on ${p.name}`
+      : `Fetched ${what} into ${out.destination}`, "success", 7000);
+  } catch (e) {
+    fail(e);
+  } finally {
+    f.busy = null;
+    f.progress[direction] = null;
+    renderDetail();
+  }
+}
+
+/** Browse the server's folders. `mode` is `folder` to choose a destination,
+ *  or `any` to choose something to fetch — a file, or the folder on show. */
+function remoteBrowser(p, { mode, start, title, onChoose }) {
+  sheet((host, close) => {
+    let current = start || "~";
+    let entries = [];
+    let picked = null;
+    let showHidden = loadPref("showHidden", false);
+
+    const pathInput = h("input", { type: "text", spellcheck: "false", autocomplete: "off" });
+    const list = h("div", { class: "remote-list" });
+    const err = h("div", { class: "sheet-error", hidden: true });
+    const choose = h("button", { class: "btn btn-primary" });
+    const up = h("button", { class: "btn btn-small", text: "Up", title: "Parent folder",
+                             onclick: () => go(parentOf(current)) });
+    const hiddenBox = h("input", { type: "checkbox", checked: showHidden, onchange: (e) => {
+      showHidden = e.target.checked; savePref("showHidden", showHidden); draw();
+    } });
+
+    const join = (dir, name) => (dir.endsWith("/") ? dir + name : `${dir}/${name}`);
+
+    async function go(dir) {
+      err.hidden = true;
+      list.replaceChildren(h("div", { class: "remote-empty" }, h("span", { class: "spinner" })));
+      try {
+        const listing = await invoke("list_remote_dir", { profileId: p.id, dir });
+        current = listing.path;
+        entries = listing.entries;
+        picked = null;
+        pathInput.value = current;
+        draw();
+      } catch (e) {
+        err.textContent = typeof e === "string" ? e : e?.message ?? String(e);
+        err.hidden = false;
+        list.replaceChildren(h("div", { class: "remote-empty", text: "Nothing to show." }));
+      }
+    }
+
+    function draw() {
+      const shown = entries
+        .filter((e) => showHidden || !e.name.startsWith("."))
+        .filter((e) => mode === "any" || e.is_dir);
+      list.replaceChildren(...(shown.length ? shown.map((e) => h("div", {
+          class: `remote-entry ${e.is_dir ? "dir" : "file"}${e.name.startsWith(".") ? " hidden-file" : ""}${picked === e.name ? " picked" : ""}`,
+          title: e.is_dir ? "Open" : "Select",
+          onclick: () => {
+            if (e.is_dir) { go(join(current, e.name)); return; }
+            picked = picked === e.name ? null : e.name;
+            draw();
+          },
+        }, h("span", { html: e.is_dir ? ICON_DIR : ICON_FILE }),
+           h("span", { class: "name", text: e.name })))
+        : [h("div", { class: "remote-empty",
+                      text: mode === "any" ? "This folder is empty." : "No folders here." })]));
+      up.disabled = current === "/";
+      choose.textContent = mode === "folder" ? "Send Here"
+        : picked ? `Fetch ${picked}` : "Fetch This Folder";
+    }
+
+    choose.addEventListener("click", () => {
+      onChoose(picked ? join(current, picked) : current);
+      close();
+    });
+    pathInput.addEventListener("keydown", (e) => { if (e.key === "Enter") go(pathInput.value); });
+
+    mount(host,
+      h("h2", { text: title }),
+      h("p", { class: "sheet-sub", text: `${p.username}@${p.host}` }),
+      h("div", { class: "remote-path" }, up, pathInput,
+        h("button", { class: "btn btn-small", text: "Go", onclick: () => go(pathInput.value) })),
+      list,
+      h("div", { class: "sheet-toolbar" },
+        h("label", { class: "checkbox", style: "margin-top:0" }, hiddenBox, h("span", { text: "Show hidden files" })),
+        h("span")),
+      err,
+      h("div", { class: "sheet-actions" },
+        h("button", { class: "btn", text: "Cancel", onclick: close }), choose));
+    go(current);
+  });
+}
+
+function parentOf(path) {
+  const trimmed = path.replace(/\/+$/, "");
+  if (!trimmed || trimmed === "~") return "/";
+  const up = trimmed.replace(/\/[^/]*$/, "");
+  return up || "/";
+}
+
+async function loadPublish(id) {
+  try {
+    setPublish(id, await invoke("publish_status", { profileId: id }));
+  } catch { /* not connected; nothing is shared */ }
+}
+
+function setPublish(id, status) {
+  if (status) state.publish.set(id, status); else state.publish.delete(id);
+  if (id === state.selectedId) renderDetail();
+}
+
+/* wiring */
+
+$("files-toggle").addEventListener("click", () => {
+  state.filesOpen = !state.filesOpen;
+  savePref("filesOpen", state.filesOpen);
+  renderDetail();
+});
+for (const b of $("files-tabs").children) {
+  b.addEventListener("click", () => {
+    state.filesTab = b.dataset.tab;
+    savePref("filesTab", state.filesTab);
+    renderDetail();
+  });
+}
+
+const withSelected = (fn) => async () => { const p = selected(); if (p) await fn(p, filesOf(p.id)); };
+
+$("send-pick-file").addEventListener("click", withSelected(async (p, f) => {
+  const path = await pickLocal("file", "Choose a file to send").catch(fail);
+  if (path) { f.sendPath = path; f.sendKind = "file"; renderDetail(); }
+}));
+$("send-pick-folder").addEventListener("click", withSelected(async (p, f) => {
+  const path = await pickLocal("folder", "Choose a folder to send").catch(fail);
+  if (path) { f.sendPath = path; f.sendKind = "folder"; renderDetail(); }
+}));
+$("send-remote").addEventListener("input", (e) => {
+  const p = selected(); if (p) filesOf(p.id).sendRemote = e.target.value;
+});
+$("send-browse").addEventListener("click", withSelected((p, f) => remoteBrowser(p, {
+  mode: "folder", start: f.sendRemote || "~", title: "Send to which folder?",
+  onChoose: (path) => { f.sendRemote = path; renderDetail(); },
+})));
+$("send-go").addEventListener("click", withSelected((p) => runTransfer(p, "send")));
+
+$("recv-remote").addEventListener("input", (e) => {
+  const p = selected(); if (!p) return;
+  filesOf(p.id).recvRemote = e.target.value;
+  $("recv-go").disabled = !e.target.value.trim() || !!filesOf(p.id).busy;
+});
+$("recv-browse").addEventListener("click", withSelected((p, f) => remoteBrowser(p, {
+  mode: "any", start: f.recvRemote ? parentOf(f.recvRemote) : "~", title: "Fetch what?",
+  onChoose: (path) => { f.recvRemote = path; renderDetail(); },
+})));
+$("recv-pick").addEventListener("click", withSelected(async (p, f) => {
+  const path = await pickLocal("folder", "Save fetched files in…", f.recvLocal || state.receiveDir).catch(fail);
+  if (path) { f.recvLocal = path; renderDetail(); }
+}));
+$("recv-go").addEventListener("click", withSelected((p) => runTransfer(p, "receive")));
+
+async function shareChoose(p, kind) {
+  const path = await pickLocal(kind, kind === "folder" ? "Choose a folder to share" : "Choose a file to share")
+    .catch(fail);
+  if (!path) return;
+  try {
+    const status = await invoke("publish_choose", { profileId: p.id, path });
+    setPublish(p.id, status);
+    toast(`Sharing ${status.name} — the link is ready to copy`, "success");
+  } catch (e) { fail(e); }
+}
+$("share-pick-file").addEventListener("click", withSelected((p) => shareChoose(p, "file")));
+$("share-pick-folder").addEventListener("click", withSelected((p) => shareChoose(p, "folder")));
+$("share-switch").addEventListener("click", withSelected(async (p) => {
+  const pub = state.publish.get(p.id);
+  if (!pub) return;
+  try {
+    setPublish(p.id, await invoke("publish_serving", { profileId: p.id, on: !pub.serving }));
+  } catch (e) { fail(e); }
+}));
+$("share-new-link").addEventListener("click", withSelected(async (p) => {
+  try {
+    setPublish(p.id, await invoke("publish_new_link", { profileId: p.id }));
+    toast("New link issued — the previous one no longer works");
+  } catch (e) { fail(e); }
+}));
+$("share-stop").addEventListener("click", withSelected(async (p) => {
+  try {
+    await invoke("publish_clear", { profileId: p.id });
+    setPublish(p.id, null);
+  } catch (e) { fail(e); }
+}));
+for (const btn of document.querySelectorAll("[data-copy]")) {
+  btn.addEventListener("click", async () => {
+    const text = $(btn.dataset.copy).textContent;
+    if (!text) return;
+    try {
+      await navigator.clipboard.writeText(text);
+      btn.textContent = "Copied";
+      setTimeout(() => { btn.textContent = "Copy"; }, 1400);
+    } catch (e) { fail(e); }
+  });
+}
+
+invoke("default_receive_dir").then((d) => { state.receiveDir = d; renderDetail(); }).catch(() => {});
+
+listen("transfer-progress", (e) => {
+  const { profile_id, direction, ...prog } = e.payload;
+  const f = filesOf(profile_id);
+  if (!f.busy) return;              // a late event after the transfer finished
+  f.progress[direction] = prog;
+  if (profile_id === state.selectedId) {
+    showProgress(direction === "send" ? "send-progress" : "recv-progress", prog);
+  }
+});
+
+listen("publish-changed", (e) => loadPublish(e.payload.profile_id));
+
 /* backend push */
 
 listen("session-status", (e) => {
   state.statuses.set(e.payload.profile_id, e.payload);
+  if (!e.payload.connected) state.publish.delete(e.payload.profile_id);
   renderSidebar();
   renderDetail();
 });
