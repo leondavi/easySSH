@@ -20,16 +20,16 @@ all from one friendly window.
 [![MIT licence](https://img.shields.io/badge/licence-MIT-2b2b2b)](LICENSE)
 
 [**Download**](../../releases/latest) ·
-[Quick start](#-quick-start) ·
-[What it does](#-what-easyssh-does-for-you) ·
-[FAQ](#-questions-people-ask) ·
-[Build it yourself](#%EF%B8%8F-building-from-source)
+[Quick start](#quick-start) ·
+[What it does](#what-easyssh-does-for-you) ·
+[FAQ](#questions-people-ask) ·
+[Build it yourself](#building-from-source)
 
 </div>
 
 ---
 
-## 👋 Welcome
+## Welcome
 
 Got a new server? Normally that's the start of a small ritual:
 `ssh-keygen`, `ssh-copy-id`, hoping the permissions are right, editing
@@ -51,7 +51,7 @@ underneath, so nothing it sets up locks you in.
 
 ---
 
-## 🚀 Quick start
+## Quick start
 
 ### 1. Install it
 
@@ -65,10 +65,10 @@ Grab the installer for your computer from the
 | Windows | `easySSH_x.y.z_x64-setup.exe` (or the `.msi`) |
 | Debian or Ubuntu | `easySSH_x.y.z_amd64.deb` |
 
-Prefer to compile it? You can [build it yourself](#%EF%B8%8F-building-from-source)
+Prefer to compile it? You can [build it yourself](#building-from-source)
 in one command.
 
-> **🍎 First launch on a Mac.** easySSH isn't signed with a paid Apple
+> **First launch on a Mac.** easySSH isn't signed with a paid Apple
 > certificate, so macOS asks you to confirm the first time. Open
 > **System Settings → Privacy & Security**, scroll down to the note about
 > easySSH, and click **Open Anyway**. (On older macOS, right-click the app and
@@ -114,27 +114,29 @@ when you're in a hurry.
 
 Click **Connect**, and from there:
 
-- 🖥️ **Terminal** — opens iTerm or Terminal.app (macOS), Windows Terminal, or
+- **Terminal** — opens iTerm or Terminal.app (macOS), Windows Terminal, or
   your usual terminal on Debian/Ubuntu, already logged in. Your shell, your
   colours, your scrollback, your tmux.
-- 🌐 **Web tunnels** — add one, flip it on, click **Open**, and the server's
+- **Web tunnels** — add one, flip it on, click **Open**, and the server's
   dashboard appears in your browser as if it were running on your own machine.
-- ⚡ **Run a command** — a quick one-off without leaving the app, with the
+- **Files** — send a file or a whole folder to the server, fetch one back, or
+  share one with programs on the server through a simple link.
+- **Run a command** — a quick one-off without leaving the app, with the
   output, errors and exit status shown.
 
-That's it. You're done. 🎉
+That's it. You're done.
 
 ---
 
-## ✨ What easySSH does for you
+## What easySSH does for you
 
-### 🚦 Shows you everything at a glance
+### Shows you everything at a glance
 
 Every connection has a row of little status lights, in the sidebar and on its
 page. easySSH keeps them up to date quietly in the background, so you can see
 how all your servers are doing without clicking into any of them.
 
-| Light | 🟢 Green | 🔵 Blue | 🟡 Yellow | 🔴 Red | ⚪ Grey |
+| Light | Green | Blue | Yellow | Red | Grey |
 | --- | --- | --- | --- | --- | --- |
 | **Session** | connected | — | dropped, being rebuilt | — | not connected |
 | **Reachable** | — | the server answers | — | no answer | not checked yet |
@@ -142,7 +144,7 @@ how all your servers are doing without clicking into any of them.
 | **Tunnels** | at least one is up | — | — | all down, or **blinking** on an error | no tunnels yet |
 | **Restore** | tunnels never dropped | — | dropped and put back | couldn't be put back | not connected |
 
-### 🌐 Opens your server's web apps in your browser
+### Opens your server's web apps in your browser
 
 A web tunnel connects a port on your computer to an address that **your
 server** can reach:
@@ -161,7 +163,65 @@ Mark a tunnel **auto-start** and it comes up as soon as you connect. Add or
 edit one while you're already connected and it starts right away. The switch
 beside each tunnel turns it on and off whenever you like.
 
-### 🔁 Puts tunnels back when the connection drops
+### Moves files and folders both ways
+
+Open the **Files** card on a connected server and pick what you want to do.
+You can collapse the card when you don't need it, and easySSH remembers that.
+
+- **Send.** Choose a file or a folder on your computer, choose where it should
+  go on the server (type a path like `~/uploads`, or click **Browse…** to walk
+  the server's folders), and click **Send**. Missing folders are created on the
+  way.
+- **Fetch.** Type or browse to a file or folder on the server, choose where to
+  save it on your computer (your Downloads folder unless you pick another), and
+  click **Fetch**.
+
+Folders are compressed into a single stream for the trip and unpacked on
+arrival, so a folder of ten thousand small files moves as one transfer, not ten
+thousand. Permissions and timestamps come along too. A progress bar shows how
+far along it is. The server needs nothing beyond the `tar` command that every
+Linux and macOS machine already has.
+
+Anything with the same name at the destination is replaced. Archives coming
+back from a server are unpacked safely: nothing in them can write outside the
+folder you chose.
+
+### Shares a file with the server through a link
+
+Sometimes a program on the server, such as an AI agent, a build script or a
+notebook, needs something that's on your computer. Choose **Share by Link**,
+pick a file or folder, and easySSH gives you a URL like this:
+
+```
+http://127.0.0.1:41817/9f3c2a7be41d06c58a1f77e2d9b0c4a1/dataset
+```
+
+Anything running *on the server* can fetch it with `curl`, `wget` or any HTTP
+client, and easySSH shows a ready-to-paste command. For a folder, the URL
+returns a list of its files, each of which can be fetched on its own, and
+`<name>.tar.gz` fetches the whole folder in one go.
+
+It's designed to be safe to leave on:
+
+- **Nothing opens on your computer or your network.** easySSH asks the server
+  to listen on its own `127.0.0.1` and send each request back through the SSH
+  connection you already have (the same mechanism as `ssh -R`). That also
+  means it works from behind home routers and office firewalls.
+- **Only programs on the server can reach it**, and only with the link.
+- **The link changes every 15 minutes.** Each link carries a random token that
+  expires after 15 minutes. easySSH always shows the current one, with a
+  countdown, so a link pasted somewhere stops working on its own. **New Link**
+  replaces it straight away.
+- **One share per connection.** Choosing something new replaces the old share.
+  The switch turns the link off and on without forgetting what you chose, and
+  **Stop Sharing** ends it completely. Disconnecting ends it too.
+- **Only what you shared is reachable.** Requests can't climb out of a shared
+  folder, including through symbolic links inside it.
+
+If the connection drops and easySSH rebuilds it, the share comes back with it,
+on the same address whenever the server allows.
+
+### Puts tunnels back when the connection drops
 
 Laptops sleep, Wi-Fi changes, VPNs drop, servers restart. When that happens to
 an ordinary SSH tunnel, the port on your computer keeps accepting connections
@@ -175,16 +235,16 @@ what's happened since you connected:
 
 | | |
 | --- | --- |
-| 🟢 **green** | it has never dropped |
-| 🟡 **yellow** | it dropped and easySSH put it back (the count shows how often) |
-| 🔴 **red** | it dropped and easySSH couldn't put it back |
+| **Green** | it has never dropped |
+| **Yellow** | it dropped and easySSH put it back (the count shows how often) |
+| **Red** | it dropped and easySSH couldn't put it back |
 
 Yellow means everything works. It's there so that a connection that keeps
 dropping stands out from one that never has. **Check Now** on the Web tunnels
 card runs the check straight away, and a checkbox underneath turns automatic
 restoring off if you'd rather manage it yourself.
 
-### 📂 Works with the ssh config you already have
+### Works with the ssh config you already have
 
 easySSH respects your setup and keeps its own things separate:
 
@@ -219,7 +279,7 @@ A few things you'll notice:
 
 Set `EASYSSH_SSH_DIR` to put a folder of your own at the top of the list.
 
-### 🔑 Takes care of your keys
+### Takes care of your keys
 
 Pick a key from your `.ssh` folder, browse to one anywhere, or create a new
 Ed25519 or RSA pair. New keys are saved so only you can read them (`0600` on
@@ -243,7 +303,7 @@ scary *"UNPROTECTED PRIVATE KEY FILE!"* warning. So easySSH marks any key `ssh`
 would refuse, offers **Fix permissions** beside it, and quietly tightens a key
 before using it, telling you what it did. You shouldn't ever need `chmod`.
 
-### 🛡️ Makes known_hosts painless
+### Makes known_hosts painless
 
 The shield icon opens a friendly editor for `known_hosts`. For each entry it
 shows the host, the key type, the fingerprint, and which of your connections
@@ -251,7 +311,7 @@ rely on it. Reach for it when a server has been rebuilt and easySSH refuses to
 connect because its host key changed. The file is backed up before every edit,
 and easySSH won't remove anything if the file changed since you opened it.
 
-### ☁️ Makes AWS EC2 simple
+### Makes AWS EC2 simple
 
 An EC2 server has no password login at all: AWS hands you a `.pem` key once,
 and the terminal refuses it because of its permissions. With easySSH you just
@@ -275,7 +335,7 @@ and everything else works as usual.
 
 ---
 
-## 🔒 How easySSH looks after your credentials
+## How easySSH looks after your credentials
 
 - **Passwords are never written to disk.** easySSH keeps one in memory only
   while it needs it: for a key install, or for the life of an open connection
@@ -293,6 +353,9 @@ and everything else works as usual.
   offer at most five keys (under OpenSSH's default limit of six attempts), and
   wait longer and longer after a refusal, up to an hour. So easySSH never looks
   like an attack to tools such as fail2ban.
+- **Shared links stay on the server.** A file you share by link is reachable
+  only from the server's own `127.0.0.1`, through your SSH connection, with a
+  token that expires every 15 minutes. Nothing listens on your computer.
 - **Only your own tunnels open in your browser.** The Open button only accepts
   `127.0.0.1` addresses.
 - **The real `ssh` runs your terminal.** easySSH hands your terminal an `ssh`
@@ -306,7 +369,7 @@ Windows and `~/.config/easySSH/` on Linux.
 
 ---
 
-## 💬 Questions people ask
+## Questions people ask
 
 <details>
 <summary><b>Do I need to know how SSH works to use this?</b></summary>
@@ -348,6 +411,22 @@ server first.
 </details>
 
 <details>
+<summary><b>How do I give an AI agent on my server a file from my laptop?</b></summary>
+
+Connect, open **Files → Share by Link**, and pick the file or folder. Copy the
+URL (or the ready-made `curl` command) and hand it to the agent. It fetches the
+file straight from your laptop through the SSH connection. The link expires
+after 15 minutes, and easySSH always shows the current one.
+</details>
+
+<details>
+<summary><b>Can I send a whole folder?</b></summary>
+
+Yes. Choose **Folder…** instead of **File…**. easySSH compresses it for the
+trip and unpacks it on the other side, both when sending and when fetching.
+</details>
+
+<details>
 <summary><b>Does it work with a password-protected (passphrase) key?</b></summary>
 
 Yes. easySSH asks for the passphrase when you connect. Background checks skip
@@ -356,7 +435,7 @@ such keys, because they can't type a passphrase for you.
 
 ---
 
-## 🛠️ Building from source
+## Building from source
 
 All you need is [Rust](https://rustup.rs). The build scripts install
 everything else.
@@ -412,14 +491,14 @@ release workflow.
 
 ---
 
-## 🤝 Contributing
+## Contributing
 
 Contributions, bug reports and ideas are very welcome. Please
 [open an issue](../../issues) or send a pull request.
 
 ```bash
 cd src-tauri
-cargo test           # 90 tests, including a real SSH server harness
+cargo test           # 109 tests, including a real SSH server harness
 cargo clippy --all-targets -- -D warnings
 cargo fmt
 ```
@@ -430,8 +509,9 @@ platforms' code can't be compiled on a Mac, so CI is what proves it works.
 
 The tests don't just read the code, they run it. `testserver.rs` is a real SSH
 server, so the tests genuinely log in with passwords and keys, forward ports
-end to end, run the `authorized_keys` script under a real shell, and cut or
-silence a live connection to prove that tunnels come back.
+end to end, run the `authorized_keys` script under a real shell, send and fetch
+folders through a real `tar`, fetch a shared link back through a reverse
+forward, and cut or silence a live connection to prove that tunnels come back.
 
 <details>
 <summary><b>Project layout</b></summary>
@@ -443,6 +523,8 @@ src-tauri/src/
   ssh.rs         connecting, key discovery, running commands, installing keys
   tunnels.rs     local port forwarding
   restore.rs     watching live tunnels and rebuilding the dead ones
+  transfer.rs    sending and fetching files and folders
+  publish.rs     sharing one file or folder with the server by link
   probe.rs       background reachability and key-login checks
   sshconfig.rs   .ssh discovery and the ssh_config parser
   knownhosts.rs  reading and editing known_hosts
@@ -470,7 +552,7 @@ there's no OpenSSL or libssh2 to install.
 
 <img src="assets/icon.png" alt="" width="64" />
 
-Made with 🦀 and care. Released under the [MIT licence](LICENSE).
+Made with care, in Rust. Released under the [MIT licence](LICENSE).
 
 **Happy connecting!**
 
