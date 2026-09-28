@@ -7,6 +7,7 @@ mod keys;
 mod knownhosts;
 mod model;
 mod probe;
+mod publish;
 mod restore;
 mod ssh;
 mod sshconfig;
@@ -15,6 +16,7 @@ mod store;
 mod terminal;
 #[cfg(test)]
 mod testserver;
+mod transfer;
 mod tunnels;
 
 use std::time::{Duration, SystemTime};
@@ -351,6 +353,16 @@ fn main() {
             commands::app_version,
             commands::restore_tunnels,
             commands::detect_passwordless,
+            commands::send_path,
+            commands::receive_path,
+            commands::list_remote_dir,
+            commands::default_receive_dir,
+            commands::pick_local_path,
+            commands::publish_status,
+            commands::publish_choose,
+            commands::publish_serving,
+            commands::publish_new_link,
+            commands::publish_clear,
             commands::set_auto_restore_tunnels,
         ])
         .setup(|app| {

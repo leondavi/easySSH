@@ -69,6 +69,10 @@ pub struct LiveSession {
     /// When the next rebuild may be attempted. `None` means "as soon as the
     /// supervisor notices".
     pub next_restore: Option<std::time::Instant>,
+    /// The one file or folder this connection is publishing as a URL, if any.
+    /// One per connection, by design: a second would need its own port and
+    /// its own link to keep track of, for no real gain.
+    pub publication: Option<crate::publish::Publication>,
 }
 
 impl LiveSession {
@@ -85,6 +89,7 @@ impl LiveSession {
             degraded: false,
             restore_failures: 0,
             next_restore: None,
+            publication: None,
         }
     }
 }

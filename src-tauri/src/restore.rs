@@ -465,6 +465,8 @@ async fn rebuild_session<R: Runtime>(app: &AppHandle<R>, profile_id: &str) -> Re
         out
     };
 
+    reattach_publication(app, profile_id).await;
+
     let mut back = 0usize;
     let mut total = 0usize;
     for spec in wanted {
@@ -531,6 +533,56 @@ async fn rebuild_session<R: Runtime>(app: &AppHandle<R>, profile_id: &str) -> Re
     }
     log::info!("rebuilt the session and forwards for {profile_id}");
     Ok(true)
+}
+
+/// Carry a published file or folder over to a rebuilt session.
+///
+/// The server's port belonged to the old session and died with it. Ask the new
+/// one for the same port, so a link an agent already holds keeps working, and
+/// fall back to any port if the old one is still held. Nothing is done for a
+/// publication that was switched off.
+async fn reattach_publication<R: Runtime>(app: &AppHandle<R>, profile_id: &str) {
+    let state = app.state::<AppState>();
+    let Some((handle, slot, shared, previous)) = ({
+        let mut inner = state.inner.lock().await;
+        inner.sessions.get_mut(profile_id).and_then(|live| {
+            let handle = live.session.handle.clone();
+            let slot = live.session.publish.clone();
+            let publication = live.publication.as_mut()?;
+            let previous = publication.remote_port.take()?;
+            Some((handle, slot, publication.shared.clone(), previous))
+        })
+    }) else {
+        return;
+    };
+
+    if let Ok(mut s) = slot.write() {
+        *s = Some(shared);
+    }
+    let port = match handle.tcpip_forward("127.0.0.1", previous).await {
+        Ok(p) => Some(p),
+        Err(_) => handle.tcpip_forward("127.0.0.1", 0).await.ok(),
+    };
+    if port.is_none() {
+        if let Ok(mut s) = slot.write() {
+            *s = None;
+        }
+        log::warn!("could not reopen the published link for {profile_id}");
+    }
+
+    let mut inner = state.inner.lock().await;
+    if let Some(p) = inner
+        .sessions
+        .get_mut(profile_id)
+        .and_then(|l| l.publication.as_mut())
+    {
+        p.remote_port = port;
+    }
+    drop(inner);
+    let _ = app.emit(
+        "publish-changed",
+        serde_json::json!({ "profile_id": profile_id }),
+    );
 }
 
 /// Push one profile's status to the UI.
@@ -708,6 +760,61 @@ mod tests {
         assert_eq!(state, RestoreState::Restored, "the lamp should be yellow");
         assert_eq!(count, 1);
         assert!(!degraded);
+    }
+
+    /// A published link is part of the connection, so it has to survive the
+    /// connection being rebuilt: the file is still fetchable afterwards.
+    #[tokio::test]
+    async fn a_published_link_survives_the_session_being_rebuilt() {
+        use tokio::io::AsyncWriteExt;
+
+        let rig = rig("publish").await;
+        let file = std::env::temp_dir().join(format!("easyssh-pub-{}.txt", std::process::id()));
+        std::fs::write(&file, "still here").unwrap();
+        let shared = Arc::new(crate::publish::Shared::new(&file).unwrap());
+        {
+            let state = rig.app.state::<AppState>();
+            let mut inner = state.inner.lock().await;
+            let live = inner.sessions.get_mut(PID).unwrap();
+            *live.session.publish.write().unwrap() = Some(shared.clone());
+            let port = live
+                .session
+                .handle
+                .tcpip_forward("127.0.0.1", 0)
+                .await
+                .unwrap();
+            live.publication = Some(crate::publish::Publication {
+                shared: shared.clone(),
+                remote_port: Some(port),
+                rotator: None,
+            });
+        }
+
+        rig.net.blackhole();
+        let swept = sweep_now(rig.app.handle(), PID).await;
+        assert_eq!(swept.sessions_rebuilt, 1, "{swept:?}");
+
+        let port = {
+            let state = rig.app.state::<AppState>();
+            let inner = state.inner.lock().await;
+            inner.sessions[PID]
+                .publication
+                .as_ref()
+                .and_then(|p| p.remote_port)
+                .expect("the link should be served again after the rebuild")
+        };
+        let mut c = tokio::net::TcpStream::connect(("127.0.0.1", port as u16))
+            .await
+            .unwrap();
+        c.write_all(format!("GET {} HTTP/1.1\r\n\r\n", shared.url_path()).as_bytes())
+            .await
+            .unwrap();
+        let mut out = Vec::new();
+        tokio::time::timeout(Duration::from_secs(5), c.read_to_end(&mut out))
+            .await
+            .expect("no answer")
+            .unwrap();
+        assert!(String::from_utf8_lossy(&out).ends_with("still here"));
     }
 
     /// Reviewer finding: a rebuild that failed during a network blip left the

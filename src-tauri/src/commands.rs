@@ -1033,3 +1033,367 @@ pub async fn probe_statuses(state: State<'_, AppState>) -> Result<Vec<ProbeStatu
     let inner = state.inner.lock().await;
     Ok(inner.probes.values().map(|r| r.status.clone()).collect())
 }
+
+// ------------------------------------------------------------------- files
+
+/// The live SSH handle for a connection, or a sentence saying why not.
+async fn live_handle(
+    state: &AppState,
+    profile_id: &str,
+) -> Result<Arc<russh::client::Handle<ssh::Client>>, String> {
+    state
+        .inner
+        .lock()
+        .await
+        .sessions
+        .get(profile_id)
+        .map(|live| live.session.handle.clone())
+        .ok_or_else(|| "connect to the host first".to_string())
+}
+
+/// Forward transfer progress to the UI, at most ten times a second. A large
+/// folder moves in thousands of chunks, and an event per chunk would only
+/// flood the page with repaints nobody can see.
+fn progress_reporter(
+    app: &AppHandle,
+    profile_id: &str,
+    direction: &'static str,
+) -> impl Fn(crate::transfer::Progress) {
+    let app = app.clone();
+    let profile_id = profile_id.to_string();
+    let last = std::sync::Mutex::new((std::time::Instant::now(), ""));
+    move |p: crate::transfer::Progress| {
+        let mut last = last.lock().unwrap_or_else(|e| e.into_inner());
+        let phase_changed = last.1 != p.phase;
+        if !phase_changed && last.0.elapsed() < std::time::Duration::from_millis(100) {
+            return;
+        }
+        *last = (std::time::Instant::now(), p.phase);
+        let _ = app.emit(
+            "transfer-progress",
+            serde_json::json!({
+                "profile_id": profile_id,
+                "direction": direction,
+                "phase": p.phase,
+                "done": p.done,
+                "total": p.total,
+            }),
+        );
+    }
+}
+
+/// Send a local file or folder into a directory on the server.
+#[tauri::command]
+pub async fn send_path(
+    app: AppHandle,
+    state: State<'_, AppState>,
+    profile_id: String,
+    local_path: String,
+    remote_dir: String,
+) -> Result<crate::transfer::Outcome, String> {
+    let handle = live_handle(&state, &profile_id).await?;
+    let progress = progress_reporter(&app, &profile_id, "send");
+    crate::transfer::send(&handle, Path::new(&local_path), &remote_dir, progress)
+        .await
+        .map_err(anyhow_err)
+}
+
+/// Fetch a remote file or folder into a directory on this machine.
+#[tauri::command]
+pub async fn receive_path(
+    app: AppHandle,
+    state: State<'_, AppState>,
+    profile_id: String,
+    remote_path: String,
+    local_dir: String,
+) -> Result<crate::transfer::Outcome, String> {
+    if local_dir.trim().is_empty() {
+        return Err("choose a folder on this computer to save into".into());
+    }
+    let handle = live_handle(&state, &profile_id).await?;
+    let progress = progress_reporter(&app, &profile_id, "receive");
+    crate::transfer::receive(&handle, &remote_path, Path::new(&local_dir), progress)
+        .await
+        .map_err(anyhow_err)
+}
+
+/// List a directory on the server, for browsing to a file or a destination.
+#[tauri::command]
+pub async fn list_remote_dir(
+    state: State<'_, AppState>,
+    profile_id: String,
+    dir: String,
+) -> Result<crate::transfer::RemoteListing, String> {
+    let handle = live_handle(&state, &profile_id).await?;
+    crate::transfer::list_remote(&handle, &dir)
+        .await
+        .map_err(anyhow_err)
+}
+
+/// Where received files go unless the user picks somewhere else.
+#[tauri::command]
+pub fn default_receive_dir() -> String {
+    dirs::download_dir()
+        .or_else(dirs::home_dir)
+        .map(|d| d.display().to_string())
+        .unwrap_or_default()
+}
+
+/// Ask the user for a file or a folder on this machine.
+///
+/// `kind` is `file` or `folder`. One dialog cannot offer both on every
+/// platform, so the UI asks which the user means.
+#[tauri::command]
+pub async fn pick_local_path(
+    app: AppHandle,
+    kind: String,
+    title: Option<String>,
+    start_in: Option<String>,
+) -> Result<Option<String>, String> {
+    use tauri_plugin_dialog::DialogExt;
+
+    let mut builder = app.dialog().file();
+    if let Some(t) = title {
+        builder = builder.set_title(t);
+    }
+    if let Some(dir) = start_in.filter(|d| Path::new(d).is_dir()) {
+        builder = builder.set_directory(dir);
+    }
+    // The dialog must run off the async command thread or it deadlocks the runtime.
+    let folder = kind == "folder";
+    let picked = tauri::async_runtime::spawn_blocking(move || {
+        if folder {
+            builder.blocking_pick_folder()
+        } else {
+            builder.blocking_pick_file()
+        }
+    })
+    .await
+    .map_err(|e| format!("the file dialog failed: {e}"))?;
+    Ok(picked.map(|p| p.to_string()))
+}
+
+// --------------------------------------------------------------- publishing
+
+/// Tell the UI this connection's publication changed, and to fetch it again.
+fn publish_changed(app: &AppHandle, profile_id: &str) {
+    let _ = app.emit(
+        "publish-changed",
+        serde_json::json!({ "profile_id": profile_id }),
+    );
+}
+
+/// Replace a publication's token when it runs out, and tell the UI, for as
+/// long as the publication exists.
+fn spawn_rotator(
+    app: &AppHandle,
+    profile_id: &str,
+    shared: Arc<crate::publish::Shared>,
+) -> tokio::task::JoinHandle<()> {
+    let app = app.clone();
+    let profile_id = profile_id.to_string();
+    tokio::spawn(async move {
+        loop {
+            // A second past expiry, so `current` is sure to have rotated.
+            tokio::time::sleep(shared.expires_in() + std::time::Duration::from_secs(1)).await;
+            let _ = shared.current();
+            publish_changed(&app, &profile_id);
+        }
+    })
+}
+
+/// What a connection is publishing, if anything.
+#[tauri::command]
+pub async fn publish_status(
+    state: State<'_, AppState>,
+    profile_id: String,
+) -> Result<Option<crate::publish::Status>, String> {
+    let inner = state.inner.lock().await;
+    Ok(inner
+        .sessions
+        .get(&profile_id)
+        .and_then(|live| live.publication.as_ref())
+        .map(|p| p.status(&profile_id)))
+}
+
+/// Start answering the server's requests: ask it to listen on its loopback
+/// interface and send each connection back down this session.
+async fn start_serving(state: &AppState, profile_id: &str) -> Result<(), String> {
+    let (handle, slot, shared, running) = {
+        let inner = state.inner.lock().await;
+        let live = inner
+            .sessions
+            .get(profile_id)
+            .ok_or("connect to the host first")?;
+        let publication = live
+            .publication
+            .as_ref()
+            .ok_or("choose a file or folder to publish first")?;
+        (
+            live.session.handle.clone(),
+            live.session.publish.clone(),
+            publication.shared.clone(),
+            publication.remote_port,
+        )
+    };
+
+    if let Ok(mut s) = slot.write() {
+        *s = Some(shared);
+    }
+    if running.is_some() {
+        return Ok(());
+    }
+    let port = handle.tcpip_forward("127.0.0.1", 0).await.map_err(|e| {
+        format!(
+            "the server would not open a port for the link ({e}). Its sshd may have \
+                 AllowTcpForwarding or remote forwarding switched off."
+        )
+    })?;
+
+    let mut inner = state.inner.lock().await;
+    match inner
+        .sessions
+        .get_mut(profile_id)
+        .and_then(|l| l.publication.as_mut())
+    {
+        Some(p) => {
+            p.remote_port = Some(port);
+            Ok(())
+        }
+        None => {
+            // Cleared while we waited on the server; do not leave its port open.
+            drop(inner);
+            let _ = handle.cancel_tcpip_forward("127.0.0.1", port).await;
+            Err("the publication was removed while it was starting".into())
+        }
+    }
+}
+
+/// Stop answering: close the server's port and forget what to serve, so even a
+/// connection already on its way in finds nothing.
+async fn stop_serving(state: &AppState, profile_id: &str) {
+    let (handle, slot, port) = {
+        let mut inner = state.inner.lock().await;
+        let Some(live) = inner.sessions.get_mut(profile_id) else {
+            return;
+        };
+        let port = live.publication.as_mut().and_then(|p| p.remote_port.take());
+        (
+            live.session.handle.clone(),
+            live.session.publish.clone(),
+            port,
+        )
+    };
+    if let Ok(mut s) = slot.write() {
+        *s = None;
+    }
+    if let Some(port) = port {
+        let _ = handle.cancel_tcpip_forward("127.0.0.1", port).await;
+    }
+}
+
+/// Publish a local file or folder on this connection, replacing whatever it
+/// published before, and start serving it.
+#[tauri::command]
+pub async fn publish_choose(
+    app: AppHandle,
+    state: State<'_, AppState>,
+    profile_id: String,
+    path: String,
+) -> Result<crate::publish::Status, String> {
+    let shared = Arc::new(crate::publish::Shared::new(Path::new(&path)).map_err(anyhow_err)?);
+    {
+        let mut inner = state.inner.lock().await;
+        let live = inner
+            .sessions
+            .get_mut(&profile_id)
+            .ok_or("connect to the host first")?;
+        // Keep the server's port when swapping the item: the old link dies with
+        // its token, and the new item is reachable at once.
+        let port = live.publication.as_ref().and_then(|p| p.remote_port);
+        live.publication = Some(crate::publish::Publication {
+            rotator: Some(spawn_rotator(&app, &profile_id, shared.clone())),
+            shared,
+            remote_port: port,
+        });
+    }
+    // Tell the UI either way: when the server refuses a port, the choice is
+    // still made, and the UI must show it — switched off — so the user can see
+    // what happened and try the switch again.
+    let started = start_serving(&state, &profile_id).await;
+    publish_changed(&app, &profile_id);
+    started?;
+    publish_status(state, profile_id)
+        .await?
+        .ok_or_else(|| "the publication disappeared".into())
+}
+
+/// Switch serving on or off, keeping the chosen file or folder.
+///
+/// Switching on issues a fresh token, so a link from an earlier run does not
+/// quietly start working again.
+#[tauri::command]
+pub async fn publish_serving(
+    app: AppHandle,
+    state: State<'_, AppState>,
+    profile_id: String,
+    on: bool,
+) -> Result<Option<crate::publish::Status>, String> {
+    if on {
+        {
+            let inner = state.inner.lock().await;
+            if let Some(p) = inner
+                .sessions
+                .get(&profile_id)
+                .and_then(|l| l.publication.as_ref())
+            {
+                if p.remote_port.is_none() {
+                    p.shared.rotate();
+                }
+            }
+        }
+        let started = start_serving(&state, &profile_id).await;
+        publish_changed(&app, &profile_id);
+        started?;
+    } else {
+        stop_serving(&state, &profile_id).await;
+        publish_changed(&app, &profile_id);
+    }
+    publish_status(state, profile_id).await
+}
+
+/// Issue a new link now, invalidating the current one.
+#[tauri::command]
+pub async fn publish_new_link(
+    app: AppHandle,
+    state: State<'_, AppState>,
+    profile_id: String,
+) -> Result<Option<crate::publish::Status>, String> {
+    {
+        let inner = state.inner.lock().await;
+        if let Some(p) = inner
+            .sessions
+            .get(&profile_id)
+            .and_then(|l| l.publication.as_ref())
+        {
+            p.shared.rotate();
+        }
+    }
+    publish_changed(&app, &profile_id);
+    publish_status(state, profile_id).await
+}
+
+/// Stop publishing altogether and forget the chosen file or folder.
+#[tauri::command]
+pub async fn publish_clear(
+    app: AppHandle,
+    state: State<'_, AppState>,
+    profile_id: String,
+) -> Result<(), String> {
+    stop_serving(&state, &profile_id).await;
+    if let Some(live) = state.inner.lock().await.sessions.get_mut(&profile_id) {
+        live.publication = None;
+    }
+    publish_changed(&app, &profile_id);
+    Ok(())
+}

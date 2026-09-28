@@ -24,6 +24,10 @@ pub struct Server {
     /// The one public key this server lets in, standing in for its
     /// `authorized_keys`. `None` refuses every key.
     accept_key: Option<ssh_key::PublicKey>,
+    /// In shell mode, a command waiting for its stdin to finish arriving.
+    /// It runs when the client sends EOF, fed everything the client wrote —
+    /// which is how a `tar xzf -` on the far end receives a whole archive.
+    pending: std::collections::HashMap<ChannelId, (String, Vec<u8>)>,
 }
 
 impl Handler for Server {
@@ -82,24 +86,13 @@ impl Handler for Server {
         session.channel_success(channel)?;
 
         match &self.shell {
-            // Run the command for real, with HOME pointed at a
-            // throwaway directory. This is what lets the
-            // authorized_keys script be tested as a script rather than
-            // as a string we hope is correct.
-            Some(home) => {
-                let out = std::process::Command::new("sh")
-                    .arg("-c")
-                    .arg(&command)
-                    .env("HOME", home)
-                    .output()
-                    .expect("run shell");
-                if !out.stdout.is_empty() {
-                    session.data(channel, out.stdout)?;
-                }
-                if !out.stderr.is_empty() {
-                    session.extended_data(channel, 1, out.stderr)?;
-                }
-                session.exit_status_request(channel, out.status.code().unwrap_or(0) as u32)?;
+            // Run the command for real, with HOME pointed at a throwaway
+            // directory — once the client has sent all of its stdin. This is
+            // what lets the authorized_keys script and the transfer scripts
+            // be tested as scripts rather than as strings we hope are right.
+            Some(_) => {
+                self.pending.insert(channel, (command, Vec::new()));
+                return Ok(());
             }
             // Otherwise echo, so the test can prove the right bytes
             // travelled, on both streams plus a non-zero status.
@@ -113,6 +106,78 @@ impl Handler for Server {
         session.eof(channel)?;
         session.close(channel)?;
         Ok(())
+    }
+
+    async fn data(
+        &mut self,
+        channel: ChannelId,
+        data: &[u8],
+        _session: &mut Session,
+    ) -> Result<(), Self::Error> {
+        if let Some((_, stdin)) = self.pending.get_mut(&channel) {
+            stdin.extend_from_slice(data);
+        }
+        Ok(())
+    }
+
+    async fn channel_eof(
+        &mut self,
+        channel: ChannelId,
+        session: &mut Session,
+    ) -> Result<(), Self::Error> {
+        let (Some((command, stdin)), Some(home)) = (self.pending.remove(&channel), &self.shell)
+        else {
+            return Ok(());
+        };
+        let out = run_shell(&command, home, stdin);
+        if !out.stdout.is_empty() {
+            session.data(channel, out.stdout)?;
+        }
+        if !out.stderr.is_empty() {
+            session.extended_data(channel, 1, out.stderr)?;
+        }
+        session.exit_status_request(channel, out.status.code().unwrap_or(0) as u32)?;
+        session.eof(channel)?;
+        session.close(channel)?;
+        Ok(())
+    }
+
+    /// Act on `ssh -R`: listen on loopback and hand every connection back to
+    /// the client as a forwarded channel, the way `sshd` does. Port 0 means
+    /// "pick one", and the chosen port is reported back through `port`.
+    async fn tcpip_forward(
+        &mut self,
+        _address: &str,
+        port: &mut u32,
+        session: &mut Session,
+    ) -> Result<bool, Self::Error> {
+        let Ok(listener) = TcpListener::bind(("127.0.0.1", *port as u16)).await else {
+            return Ok(false);
+        };
+        let bound = listener.local_addr().map(|a| a.port()).unwrap_or(0) as u32;
+        *port = bound;
+        let handle = session.handle();
+        tokio::spawn(async move {
+            while let Ok((mut socket, peer)) = listener.accept().await {
+                let handle = handle.clone();
+                tokio::spawn(async move {
+                    let Ok(channel) = handle
+                        .channel_open_forwarded_tcpip(
+                            "127.0.0.1",
+                            bound,
+                            peer.ip().to_string(),
+                            peer.port() as u32,
+                        )
+                        .await
+                    else {
+                        return;
+                    };
+                    let mut stream = channel.into_stream();
+                    let _ = tokio::io::copy_bidirectional(&mut socket, &mut stream).await;
+                });
+            }
+        });
+        Ok(true)
     }
 
     /// Accept a forwarded channel and echo whatever is written to it,
@@ -151,6 +216,32 @@ impl Handler for Server {
         });
         Ok(())
     }
+}
+
+/// Run `command` under `sh` in `home`, feeding it `stdin`.
+///
+/// The input is written from its own thread: a command that produces output
+/// while still reading (tar does) would otherwise deadlock against a full pipe.
+fn run_shell(command: &str, home: &std::path::Path, stdin: Vec<u8>) -> std::process::Output {
+    use std::io::Write;
+    use std::process::{Command, Stdio};
+    let mut child = Command::new("sh")
+        .arg("-c")
+        .arg(command)
+        .env("HOME", home)
+        .current_dir(home)
+        .stdin(Stdio::piped())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .spawn()
+        .expect("run shell");
+    let mut pipe = child.stdin.take().expect("stdin");
+    let feeder = std::thread::spawn(move || {
+        let _ = pipe.write_all(&stdin);
+    });
+    let out = child.wait_with_output().expect("wait for shell");
+    let _ = feeder.join();
+    out
 }
 
 /// Start an echoing server on an ephemeral port.

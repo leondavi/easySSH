@@ -43,10 +43,39 @@ pub struct Client {
     fingerprint: Arc<Mutex<Option<String>>>,
     /// Set when we accepted a host we had never seen before.
     first_contact: Arc<AtomicBool>,
+    /// What to answer connections the server forwards back to us with — the
+    /// file or folder this connection is publishing, if any.
+    publish: crate::publish::Slot,
 }
 
 impl client::Handler for Client {
     type Error = russh::Error;
+
+    /// A program on the server fetched a published URL. The server's remote
+    /// forward hands that connection to us as a channel, and it is answered
+    /// right here — nothing listens on this machine's network.
+    async fn server_channel_open_forwarded_tcpip(
+        &mut self,
+        channel: russh::Channel<client::Msg>,
+        _connected_address: &str,
+        _connected_port: u32,
+        _originator_address: &str,
+        _originator_port: u32,
+        reply: russh::client::ChannelOpenHandle,
+        _session: &mut client::Session,
+    ) -> Result<(), Self::Error> {
+        let shared = self.publish.read().ok().and_then(|slot| slot.clone());
+        match shared {
+            Some(shared) => {
+                reply.accept().await;
+                tokio::spawn(crate::publish::serve(channel.into_stream(), shared));
+            }
+            // Nothing published: dropping the handle refuses the channel, so
+            // the client on the server sees its connection close.
+            None => drop(reply),
+        }
+        Ok(())
+    }
 
     async fn check_server_key(
         &mut self,
@@ -107,6 +136,8 @@ pub struct Session {
     pub handle: Arc<Handle<Client>>,
     pub fingerprint: String,
     pub first_contact: bool,
+    /// Set this to publish a file over the session; see `publish`.
+    pub publish: crate::publish::Slot,
 }
 
 /// Result of running a single remote command.
@@ -141,14 +172,18 @@ fn config() -> Arc<Config> {
     })
 }
 
-async fn open(
-    host: &str,
-    port: u16,
-    known_hosts: &Path,
-    policy: HostKeyPolicy,
-) -> Result<(Handle<Client>, Arc<Mutex<Option<String>>>, Arc<AtomicBool>)> {
+/// What `open` hands back, before authentication.
+struct Opened {
+    handle: Handle<Client>,
+    fingerprint: Arc<Mutex<Option<String>>>,
+    first_contact: Arc<AtomicBool>,
+    publish: crate::publish::Slot,
+}
+
+async fn open(host: &str, port: u16, known_hosts: &Path, policy: HostKeyPolicy) -> Result<Opened> {
     let fingerprint = Arc::new(Mutex::new(None));
     let first_contact = Arc::new(AtomicBool::new(false));
+    let publish = crate::publish::Slot::default();
     let handler = Client {
         host: host.to_string(),
         port,
@@ -156,6 +191,7 @@ async fn open(
         policy,
         fingerprint: fingerprint.clone(),
         first_contact: first_contact.clone(),
+        publish: publish.clone(),
     };
 
     // Resolve and connect with a bounded timeout: an unreachable host should not
@@ -166,23 +202,26 @@ async fn open(
         .map_err(|_| anyhow!("timed out connecting to {host}:{port}"))?
         .with_context(|| format!("could not reach {host}:{port}"))?;
 
-    Ok((handle, fingerprint, first_contact))
+    Ok(Opened {
+        handle,
+        fingerprint,
+        first_contact,
+        publish,
+    })
 }
 
-fn finish(
-    handle: Handle<Client>,
-    fingerprint: Arc<Mutex<Option<String>>>,
-    first_contact: Arc<AtomicBool>,
-) -> Session {
-    let fp = fingerprint
+fn finish(opened: Opened) -> Session {
+    let fp = opened
+        .fingerprint
         .lock()
         .ok()
         .and_then(|g| g.clone())
         .unwrap_or_else(|| "unknown".into());
     Session {
-        handle: Arc::new(handle),
+        handle: Arc::new(opened.handle),
         fingerprint: fp,
-        first_contact: first_contact.load(Ordering::Relaxed),
+        first_contact: opened.first_contact.load(Ordering::Relaxed),
+        publish: opened.publish,
     }
 }
 
@@ -216,7 +255,8 @@ pub async fn connect_password_with(
     known_hosts: &Path,
     policy: HostKeyPolicy,
 ) -> Result<Session> {
-    let (mut handle, fingerprint, first_contact) = open(host, port, known_hosts, policy).await?;
+    let mut opened = open(host, port, known_hosts, policy).await?;
+    let handle = &mut opened.handle;
 
     let result = handle
         .authenticate_password(username, password)
@@ -247,7 +287,7 @@ pub async fn connect_password_with(
         }
     }
 
-    Ok(finish(handle, fingerprint, first_contact))
+    Ok(finish(opened))
 }
 
 /// Connect using a private key file.
@@ -267,7 +307,8 @@ pub async fn connect_key(
         )
     })?;
 
-    let (mut handle, fingerprint, first_contact) = open(host, port, known_hosts, policy).await?;
+    let mut opened = open(host, port, known_hosts, policy).await?;
+    let handle = &mut opened.handle;
 
     // RSA keys must be signed with a hash the server actually accepts; older
     // servers want SHA-1 while modern ones require SHA-2.
@@ -287,7 +328,7 @@ pub async fn connect_key(
         ));
     }
 
-    Ok(finish(handle, fingerprint, first_contact))
+    Ok(finish(opened))
 }
 
 /// The most keys offered in one discovery attempt.
@@ -322,7 +363,8 @@ pub async fn find_working_key(
         return Ok(None);
     }
 
-    let (mut handle, fingerprint, first_contact) = open(host, port, known_hosts, policy).await?;
+    let mut opened = open(host, port, known_hosts, policy).await?;
+    let handle = &mut opened.handle;
     let hash_alg = handle.best_supported_rsa_hash().await?.flatten();
 
     for (path, key) in loaded {
@@ -334,7 +376,7 @@ pub async fn find_working_key(
             .await
             .context("public key authentication failed")?;
         if result.success() {
-            return Ok(Some((path, finish(handle, fingerprint, first_contact))));
+            return Ok(Some((path, finish(opened))));
         }
     }
 
@@ -398,6 +440,9 @@ pub async fn connect_profile_with(
 pub async fn exec(handle: &Handle<Client>, command: &str) -> Result<Output> {
     let mut channel = handle.channel_open_session().await?;
     channel.exec(true, command).await?;
+    // Nothing will be written to the command's stdin, so say so. A command
+    // that reads stdin would otherwise wait for input that never comes.
+    let _ = channel.eof().await;
 
     let mut stdout = Vec::new();
     let mut stderr = Vec::new();
