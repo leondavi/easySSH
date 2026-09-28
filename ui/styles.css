@@ -189,15 +189,19 @@ body {
   user-select: none;
 }
 
+/* The glow is a box-shadow shaped by the tile's own corner radius, not a
+   `filter: drop-shadow`. A filtered element is painted on a layer of its own,
+   and inside the sidebar's backdrop blur macOS's web view fills that layer's
+   square bounds without the blur — a dark box around the logo that came and
+   went as the window redrew. For the same reason the logo is not animated. */
 .brand-logo {
   width: 64px; height: 64px;
   flex: none;
-  border-radius: 15px;
-  filter: drop-shadow(0 8px 18px rgba(242, 107, 33, 0.40));
+  border-radius: 24%;
+  box-shadow: 0 7px 18px -5px rgba(242, 107, 33, 0.50),
+              0 2px 6px rgba(0, 0, 0, 0.22);
   -webkit-user-drag: none;
-  transition: transform 260ms var(--ease);
 }
-.brand-block:hover .brand-logo { transform: rotate(-4deg) scale(1.04); }
 
 .brand-words { display: flex; flex-direction: column; line-height: 1.1; min-width: 0; }
 
@@ -424,8 +428,11 @@ body {
   text-shadow: 0 -0.5px 0 rgba(110, 35, 0, 0.25);
   font-weight: 600;
 }
-.btn-primary:hover  { background: var(--crab-sheen), var(--crab-gloss); filter: brightness(1.06) saturate(1.05); }
-.btn-primary:active { background: var(--crab-gloss); filter: brightness(0.93); }
+/* Lightened and darkened with an overlay rather than `filter`, for the same
+   reason as the logo: a filter inside the title bar's backdrop blur can paint
+   a box around the button. */
+.btn-primary:hover  { background: linear-gradient(rgba(255,255,255,0.10), rgba(255,255,255,0.10)), var(--crab-sheen), var(--crab-gloss); }
+.btn-primary:active { background: linear-gradient(rgba(0,0,0,0.08), rgba(0,0,0,0.08)), var(--crab-gloss); }
 
 .btn-danger { color: var(--red); }
 .btn-danger:hover { background: color-mix(in srgb, var(--red) 10%, transparent); }
@@ -452,7 +459,9 @@ body {
 }
 .empty-art img {
   width: 176px; height: 176px;
-  filter: drop-shadow(0 18px 36px rgba(242, 107, 33, 0.28));
+  border-radius: 24%;
+  box-shadow: 0 24px 50px -14px rgba(242, 107, 33, 0.42),
+              0 8px 22px rgba(0, 0, 0, 0.18);
   -webkit-user-drag: none;
   animation: float 6s ease-in-out infinite;
 }
