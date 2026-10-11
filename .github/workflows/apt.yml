@@ -1,0 +1,137 @@
+# Publish the release's .deb to the APT repository on GitHub Pages, so Debian
+# and Ubuntu users can `sudo apt install easy-ssh` and get updates through
+# `apt upgrade`.
+#
+# Runs when a release is published — not when release.yml makes the draft, so
+# nothing reaches apt users before the release has been reviewed. To publish an
+# existing release by hand: Actions → APT repository → Run workflow.
+#
+# The repository is static files on the gh-pages branch:
+#
+#   key.gpg                                   public signing key
+#   dists/stable/InRelease, Release(.gpg)     signed index
+#   dists/stable/main/binary-<arch>/Packages  package list per architecture
+#   pool/main/*.deb                           the packages
+#
+# Needs the APT_GPG_KEY secret: an ASCII-armoured private key with no
+# passphrase, used only for signing this repository.
+
+name: APT repository
+
+on:
+  release:
+    types: [published]
+  workflow_dispatch:
+    inputs:
+      tag:
+        description: Release tag to publish (e.g. v1.6.1)
+        required: true
+
+permissions:
+  contents: write
+
+# Two publishes at once would each force-push their own view of gh-pages.
+concurrency:
+  group: apt-repo
+  cancel-in-progress: false
+
+env:
+  # Older versions kept per architecture, so users can still downgrade. The
+  # rest are dropped: Pages sites are capped at 1 GB.
+  KEEP_VERSIONS: 5
+
+jobs:
+  publish:
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Install tools
+        run: sudo apt-get update && sudo apt-get install -y apt-utils gnupg
+
+      - name: Import signing key
+        env:
+          APT_GPG_KEY: ${{ secrets.APT_GPG_KEY }}
+        run: |
+          if [ -z "$APT_GPG_KEY" ]; then
+            echo "::error::The APT_GPG_KEY secret is not set."
+            exit 1
+          fi
+          echo "$APT_GPG_KEY" | gpg --batch --import
+          KEY_ID=$(gpg --list-secret-keys --with-colons | awk -F: '/^sec/ { print $5; exit }')
+          echo "KEY_ID=$KEY_ID" >> "$GITHUB_ENV"
+
+      # Start from what is already published, so earlier versions stay
+      # available. On the first run there is no gh-pages branch yet.
+      - name: Fetch the current repository
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          git clone --depth 1 --branch gh-pages \
+            "https://x-access-token:${GH_TOKEN}@github.com/${GITHUB_REPOSITORY}.git" site \
+            || mkdir site
+          rm -rf site/.git
+          mkdir -p site/pool/main
+
+      - name: Add the release's packages
+        env:
+          GH_TOKEN: ${{ github.token }}
+          TAG: ${{ github.event.release.tag_name || inputs.tag }}
+        run: |
+          gh release download "$TAG" --repo "$GITHUB_REPOSITORY" \
+            --pattern '*.deb' --dir site/pool/main --clobber
+          ls -l site/pool/main
+
+      - name: Drop old versions
+        working-directory: site/pool/main
+        run: |
+          for arch in $(ls *.deb | sed -E 's/.*_([^_]+)\.deb$/\1/' | sort -u); do
+            ls *_"$arch".deb | sort -V | head -n -"$KEEP_VERSIONS" | xargs -r rm -v
+          done
+
+      - name: Build and sign the index
+        working-directory: site
+        run: |
+          ARCHES=$(ls pool/main/*.deb | sed -E 's/.*_([^_]+)\.deb$/\1/' | sort -u | tr '\n' ' ')
+          rm -rf dists
+          for arch in $ARCHES; do
+            dir=dists/stable/main/binary-$arch
+            mkdir -p "$dir"
+            apt-ftparchive --arch "$arch" packages pool > "$dir/Packages"
+            gzip -9kf "$dir/Packages"
+          done
+
+          # Written outside dists/ first: apt-ftparchive would otherwise
+          # checksum its own half-written output.
+          apt-ftparchive \
+            -o APT::FTPArchive::Release::Origin=easySSH \
+            -o APT::FTPArchive::Release::Label=easySSH \
+            -o APT::FTPArchive::Release::Suite=stable \
+            -o APT::FTPArchive::Release::Codename=stable \
+            -o "APT::FTPArchive::Release::Architectures=$ARCHES" \
+            -o APT::FTPArchive::Release::Components=main \
+            -o "APT::FTPArchive::Release::Description=easySSH packages" \
+            release dists/stable > ../Release
+          mv ../Release dists/stable/Release
+
+          gpg --batch --yes --default-key "$KEY_ID" --clearsign \
+            -o dists/stable/InRelease dists/stable/Release
+          gpg --batch --yes --default-key "$KEY_ID" --armor --detach-sign \
+            -o dists/stable/Release.gpg dists/stable/Release
+          gpg --armor --export "$KEY_ID" > key.gpg
+
+          touch .nojekyll
+
+      # A single fresh commit each time: dropped .debs leave no history behind,
+      # so the branch stays the size of what is published.
+      - name: Publish to gh-pages
+        working-directory: site
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          git init -q -b gh-pages
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git add -A
+          git commit -q -m "APT repository for ${{ github.event.release.tag_name || inputs.tag }}"
+          git push --force \
+            "https://x-access-token:${GH_TOKEN}@github.com/${GITHUB_REPOSITORY}.git" gh-pages

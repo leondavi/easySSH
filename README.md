@@ -63,7 +63,29 @@ Grab the installer for your computer from the
 | Mac with Apple Silicon (M1 and later) | `easySSH_x.y.z_aarch64.dmg` |
 | Mac with an Intel chip | `easySSH_x.y.z_x64.dmg` |
 | Windows | `easySSH_x.y.z_x64-setup.exe` (or the `.msi`) |
-| Debian or Ubuntu | `easySSH_x.y.z_amd64.deb` |
+| Debian or Ubuntu | `sudo apt install easy-ssh` — [see below](#install-with-apt-debian-and-ubuntu) (or download `easySSH_x.y.z_amd64.deb`) |
+
+#### Install with apt (Debian and Ubuntu)
+
+Add the easySSH repository once:
+
+```sh
+curl -fsSL https://leondavi.github.io/easySSH/key.gpg \
+  | sudo gpg --dearmor -o /usr/share/keyrings/easyssh.gpg
+echo "deb [signed-by=/usr/share/keyrings/easyssh.gpg] https://leondavi.github.io/easySSH stable main" \
+  | sudo tee /etc/apt/sources.list.d/easyssh.list
+```
+
+Then install it:
+
+```sh
+sudo apt update
+sudo apt install easy-ssh
+```
+
+From then on, new versions arrive with your usual `sudo apt upgrade`.
+Needs Ubuntu 22.04 or Debian 12 or newer, on a 64-bit Intel/AMD machine. To
+remove it: `sudo apt remove easy-ssh`, then delete the two files above.
 
 Prefer to compile it? You can [build it yourself](#building-from-source)
 in one command.
@@ -498,6 +520,14 @@ To ship to other people without the first-launch prompt, you need an Apple
 Developer ID and notarisation. Set `APPLE_SIGNING_IDENTITY`, `APPLE_ID`,
 `APPLE_PASSWORD` and `APPLE_TEAM_ID`, or add them as repository secrets for the
 release workflow.
+
+### The APT repository
+
+Publishing a release runs `.github/workflows/apt.yml`, which adds its `.deb`
+to the APT repository served from the `gh-pages` branch on GitHub Pages. The
+index is signed with the private key in the `APT_GPG_KEY` repository secret.
+To republish an existing release, run the **APT repository** workflow by hand
+and give it the tag.
 
 ---
 
