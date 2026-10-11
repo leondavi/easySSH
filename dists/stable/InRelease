@@ -1,0 +1,39 @@
+-----BEGIN PGP SIGNED MESSAGE-----
+Hash: SHA512
+
+Architectures: amd64 
+Codename: stable
+Components: main
+Date: Sun, 11 Oct 2026 12:03:49 +0000
+Description: easySSH packages
+Label: easySSH
+Origin: easySSH
+Suite: stable
+MD5Sum:
+ 9171d767da3ae41076946460d359ff17              794 main/binary-amd64/Packages
+ e60bfb7d1ef1ac2bf01af2de36538053              547 main/binary-amd64/Packages.gz
+SHA1:
+ 908b98bbf2f4b1482bdff2e3f0e7a96d0ba2c5b9              794 main/binary-amd64/Packages
+ f65bf4e41d14993f1e092aaffba442ac11b35d04              547 main/binary-amd64/Packages.gz
+SHA256:
+ 315742ba94af154b20c5517ea7f12c3429eb43428777b19bbbfe5c1fa0d55489              794 main/binary-amd64/Packages
+ 08ae0d3686974b50fe517a00e9e4a25ab9f9f90ad8c9b8c97245849570fff9ce              547 main/binary-amd64/Packages.gz
+SHA512:
+ 994b2f998825d701984dea7d5594097faeb5b944e64c09e7e97ed75e7dd88dce1d517a26400289e68f5a58540263d57b169e7cc32a1c4108d531da9199f90eb5              794 main/binary-amd64/Packages
+ dd6541f866dd6472b3c93ba2d6430c4b41a1711de12e7a8ce92efec80036a85b6bad5721c40787d6a39af61923c5da425944c562443aa1b99266a1bfcdfba3e5              547 main/binary-amd64/Packages.gz
+-----BEGIN PGP SIGNATURE-----
+
+iQIzBAEBCgAdFiEEFSCFbVGHKBtxIRs533h+oGVrtuEFAmrLeyUACgkQ33h+oGVr
+tuGPcBAArXCk1OUvKeKpyjjcCcqDna+f9sBGwdjzScz5h5H5kT21erBwnBvvHho2
+e+1NLiR4+Rzid5poDJ0VJqI4p0xG6+UWI5oFKy5l3H37Og+/i+2KN8SNFXNOydQ7
+PAFB3JFTN5E0NHvyCZEoITKumI8D/2xacjfpKP6OqLqJNZWVxv4U00z9h1Caf5Mx
+t4Ojf7PZJiRmUFrxbh6ugvi4UG/fB01Lt9bOw5gBUlU4Z/lQ5KT8GKQaG+N0img9
+FS3550h/wUWSvEl5HhEGRfh+7Xip+ISiOvdvNb5l6KgyZ5ktBq3k8r0Wi+a2NpP1
+fNmc73SKg94ZgD04asrBosZXtNfOJ/ilffyyI9x0VOeOtpIip2WyKTsYrSeMJqvV
+/dJp8aiaFqxc9q6SQaEQqc0z7jH9+XSIQJ9hN7p30+taTGv2NJANqfrfHPaqhFLp
+K/Lpgnq7cxHGxc6V56QLJ/6Co0A5eZBYF7pm+u1zVD4LQTF7lySOg8/lIuAedRJW
+r/h3xM5D6BwvfzagKlT26KfNvmbgkIJyQhSk52OSiz54Pz58EO5VehNg1NfcncVm
+p2ttEe+Xn/EgCbTWsldgRki7irHLr/1/NQM/wFZwdnHvlvMCKC9StCSnNbMbu+y0
+3IUM8M+1V20JjYxUIcDW1zOM8MjtfZF4MRFU9ahQ5sswiimP7hE=
+=+ICJ
+-----END PGP SIGNATURE-----
