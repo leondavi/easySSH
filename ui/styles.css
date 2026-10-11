@@ -1048,6 +1048,15 @@ input, select, textarea { user-select: text; }
 /* The whole connection is open but carrying nothing. Said in the status card
    rather than only in a lamp, because it is the answer to "why is my page not
    loading". */
+.hostkey-note { background: color-mix(in srgb, var(--red) 10%, transparent); }
+.hostkey-note strong { color: var(--red); }
+
+.fp-compare { display: flex; flex-direction: column; gap: 8px; margin: 4px 0 2px; }
+.fp-compare > div { padding: 8px 11px; border-radius: var(--radius); background: var(--bg-inset); }
+.fp-compare .fp-label { display: block; font-size: 11.5px; color: var(--text-2); margin-bottom: 2px; }
+.fp-compare .mono { font-size: 12px; word-break: break-all; }
+.fp-compare .fp-old .mono { text-decoration: line-through; color: var(--text-3); }
+
 .degraded-note {
   margin-top: 10px;
   font-size: 12px;

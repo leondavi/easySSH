@@ -45,7 +45,7 @@ underneath, so nothing it sets up locks you in.
 | `ssh-keygen` + `ssh-copy-id` + fixing `authorized_keys` permissions | type your password once and click **Set Up** |
 | `ssh -L 8080:localhost:3000 user@host` and remembering ports | flip a switch and click **Open** |
 | editing `~/.ssh/config` by hand | click **Add to Config** |
-| `vim ~/.ssh/known_hosts` after a server rebuild | select the entry and click **Remove** |
+| `ssh-keygen -R host` after "REMOTE HOST IDENTIFICATION HAS CHANGED" | review the new fingerprint and click **Trust New Key** |
 | `chmod 600 aws-key.pem` and `ssh -i … ec2-user@…` | **Browse…** to the `.pem` and click **Connect** |
 | `chmod 600 ~/.ssh/that-key` after ssh refuses it | nothing — easySSH spots it and fixes it |
 
@@ -307,9 +307,16 @@ before using it, telling you what it did. You shouldn't ever need `chmod`.
 
 The shield icon opens a friendly editor for `known_hosts`. For each entry it
 shows the host, the key type, the fingerprint, and which of your connections
-rely on it. Reach for it when a server has been rebuilt and easySSH refuses to
-connect because its host key changed. The file is backed up before every edit,
-and easySSH won't remove anything if the file changed since you opened it.
+rely on it. The file is backed up before every edit, and easySSH won't remove
+anything if the file changed since you opened it.
+
+When a server's host key changes (a cloud VM that was recreated, a reinstalled
+box), ssh in your terminal stops with *REMOTE HOST IDENTIFICATION HAS CHANGED*.
+easySSH spots the same thing, from a connect attempt or its background check,
+and puts a warning on that connection. **Review…** shows the old and new
+fingerprints side by side. **Trust New Key** swaps the stale entry for the key
+you just saw, never whatever the server sends next, so the terminal's `ssh`
+works again too.
 
 ### Makes AWS EC2 simple
 
@@ -344,7 +351,8 @@ and everything else works as usual.
 - **Server identities are checked.** The first time you connect, easySSH
   records the server's host key and shows you its fingerprint. If that key ever
   *changes*, easySSH refuses to connect, because that's what an impersonation
-  attack looks like.
+  attack looks like. It still warns you and offers to trust the new key, and
+  only you can say yes.
 - **Nothing happens behind your back with a new server.** Background checks and
   automatic reconnects only ever *log in* to servers already in your
   `known_hosts`, so a key or password is never offered to a machine you haven't
@@ -404,9 +412,11 @@ page. If you're in a hurry, click **Check Now** on the Web tunnels card.
 <details>
 <summary><b>easySSH says the host key changed and won't connect.</b></summary>
 
-That's easySSH protecting you. If you know the server was rebuilt or
-reinstalled, open the shield icon, remove the old entry for that server, and
-connect again. If you *don't* know why it changed, check with whoever runs the
+That's easySSH protecting you. The connection shows a red *host key has
+changed* warning. If you know the server was rebuilt, reinstalled or recreated,
+click **Review…**, compare the fingerprints, and click **Trust New Key**. This
+also clears the `REMOTE HOST IDENTIFICATION HAS CHANGED` error from `ssh` in
+your terminal. If you *don't* know why it changed, check with whoever runs the
 server first.
 </details>
 

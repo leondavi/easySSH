@@ -106,6 +106,14 @@
 
         <p id="degraded-note" class="degraded-note" hidden></p>
 
+        <div id="hostkey-note" class="callout hostkey-note" hidden>
+          <div class="callout-body">
+            <strong>This server's host key has changed</strong>
+            <p>It no longer matches the one in known_hosts, so ssh and easySSH refuse to connect. If the server was rebuilt or recreated, trust its new key.</p>
+          </div>
+          <button class="btn btn-small" id="hostkey-btn">Review…</button>
+        </div>
+
         <div id="fingerprint-row" class="fingerprint" hidden>
           <span class="mono" id="fingerprint"></span>
         </div>

@@ -43,6 +43,9 @@ pub struct Client {
     fingerprint: Arc<Mutex<Option<String>>>,
     /// Set when we accepted a host we had never seen before.
     first_contact: Arc<AtomicBool>,
+    /// The key the server presented, when it differs from the one recorded
+    /// for it. Kept so the user can be offered exactly this key as the fix.
+    changed: Arc<Mutex<Option<russh::keys::PublicKey>>>,
     /// What to answer connections the server forwards back to us with — the
     /// file or folder this connection is publishing, if any.
     publish: crate::publish::Slot,
@@ -117,7 +120,20 @@ impl client::Handler for Client {
                 }
                 Ok(true)
             }
-            // `KeyChanged` lands here. Refuse: this is the case worth being loud about.
+            // The host is known under a different key. Refuse: this is the case
+            // worth being loud about. Remember what it presented so the user can
+            // review it and, if the change was legitimate, trust it.
+            Err(russh::keys::Error::KeyChanged { line }) => {
+                log::error!(
+                    "host key for {}:{} does not match known_hosts line {line}",
+                    self.host,
+                    self.port
+                );
+                if let Ok(mut slot) = self.changed.lock() {
+                    *slot = Some(server_public_key.clone());
+                }
+                Ok(false)
+            }
             Err(e) => {
                 log::error!(
                     "host key check failed for {}:{} — {e}",
@@ -129,6 +145,41 @@ impl client::Handler for Client {
         }
     }
 }
+
+/// The server presented a different host key from the one `known_hosts` has
+/// for it. Either the server was rebuilt or reinstalled — common with cloud
+/// VMs, which get a fresh key when recreated — or someone is in the middle.
+///
+/// Carried as a typed error so callers can tell it apart from every other
+/// failure and offer the fix instead of a dead end.
+#[derive(Debug, Clone)]
+pub struct HostKeyChanged {
+    pub host: String,
+    pub port: u16,
+    /// The key the server presented this time.
+    pub presented: russh::keys::PublicKey,
+}
+
+impl HostKeyChanged {
+    pub fn fingerprint(&self) -> String {
+        self.presented.fingerprint(Default::default()).to_string()
+    }
+}
+
+impl std::fmt::Display for HostKeyChanged {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(
+            f,
+            "the host key for {}:{} has changed — the server now presents {}, \
+             which does not match known_hosts",
+            self.host,
+            self.port,
+            self.fingerprint()
+        )
+    }
+}
+
+impl std::error::Error for HostKeyChanged {}
 
 /// A live connection plus the facts the UI wants to display about it.
 pub struct Session {
@@ -183,6 +234,7 @@ struct Opened {
 async fn open(host: &str, port: u16, known_hosts: &Path, policy: HostKeyPolicy) -> Result<Opened> {
     let fingerprint = Arc::new(Mutex::new(None));
     let first_contact = Arc::new(AtomicBool::new(false));
+    let changed = Arc::new(Mutex::new(None));
     let publish = crate::publish::Slot::default();
     let handler = Client {
         host: host.to_string(),
@@ -191,16 +243,31 @@ async fn open(host: &str, port: u16, known_hosts: &Path, policy: HostKeyPolicy) 
         policy,
         fingerprint: fingerprint.clone(),
         first_contact: first_contact.clone(),
+        changed: changed.clone(),
         publish: publish.clone(),
     };
 
     // Resolve and connect with a bounded timeout: an unreachable host should not
     // leave the UI spinning on the OS default of ~75 seconds.
     let connect = client::connect(config(), (host, port), handler);
-    let handle = tokio::time::timeout(Duration::from_secs(20), connect)
+    let handle = match tokio::time::timeout(Duration::from_secs(20), connect)
         .await
         .map_err(|_| anyhow!("timed out connecting to {host}:{port}"))?
-        .with_context(|| format!("could not reach {host}:{port}"))?;
+    {
+        Ok(handle) => handle,
+        Err(e) => {
+            // A refused host key surfaces from russh as a generic handshake
+            // failure; say what actually happened.
+            if let Some(presented) = changed.lock().ok().and_then(|mut g| g.take()) {
+                return Err(anyhow::Error::new(HostKeyChanged {
+                    host: host.to_string(),
+                    port,
+                    presented,
+                }));
+            }
+            return Err(anyhow::Error::new(e).context(format!("could not reach {host}:{port}")));
+        }
+    };
 
     Ok(Opened {
         handle,
@@ -702,6 +769,47 @@ mod tests {
             .await
             .expect("reconnect");
         assert!(!again.first_contact, "the host should now be known");
+    }
+
+    /// A server rebuilt with a new key (a recreated cloud VM, say) is refused
+    /// with a typed error carrying the key it presented, and trusting that key
+    /// lets the next connection through.
+    #[tokio::test]
+    async fn a_changed_host_key_is_refused_then_fixable() {
+        let port = harness::start().await;
+        let kh = harness::known_hosts("changed");
+        let dir = kh.parent().unwrap();
+
+        // Record some other ed25519 key for this host, as if from before a rebuild.
+        let stale =
+            ssh_key::PrivateKey::random(&mut rand::rng(), ssh_key::Algorithm::Ed25519).unwrap();
+        russh::keys::known_hosts::learn_known_hosts_path(
+            "127.0.0.1",
+            port,
+            stale.public_key(),
+            &kh,
+        )
+        .unwrap();
+
+        let err = connect_password("127.0.0.1", port, "someone", harness::PASSWORD, &kh)
+            .await
+            .err()
+            .expect("a changed host key must be refused");
+        let change = err
+            .downcast_ref::<HostKeyChanged>()
+            .unwrap_or_else(|| panic!("not reported as a changed key: {err:#}"))
+            .clone();
+        assert_ne!(&change.presented, stale.public_key());
+
+        assert_eq!(
+            crate::knownhosts::replace(dir, "127.0.0.1", port, &change.presented).unwrap(),
+            1
+        );
+        let session = connect_password("127.0.0.1", port, "someone", harness::PASSWORD, &kh)
+            .await
+            .expect("the accepted key should now be trusted");
+        assert_eq!(session.fingerprint, change.fingerprint());
+        assert!(!session.first_contact);
     }
 
     /// The authorized_keys script is the heart of the headline feature, and a

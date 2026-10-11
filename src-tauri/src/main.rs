@@ -210,9 +210,23 @@ fn watch_key_auth(app: AppHandle) {
                 let mut switched = false;
                 match outcome {
                     probe::KeyAuth::Works(path) => {
+                        inner.clear_host_key_change(&profile.id);
                         switched = inner.record_working_key(&profile.id, &path.to_string_lossy());
                     }
+                    // Most often the user meets this in a terminal, as OpenSSH's
+                    // "REMOTE HOST IDENTIFICATION HAS CHANGED". Flag it, so the
+                    // connection's page can explain it and offer the fix.
+                    probe::KeyAuth::HostKeyChanged(change) => {
+                        inner.record_host_key_change(&profile.id, change);
+                        let record = inner.probes.entry(profile.id.clone()).or_default();
+                        record.status.key_auth_at = Some(store::now());
+                        record.status.key_auth = None;
+                        record.status.key_auth_note =
+                            Some("the server's host key has changed".into());
+                    }
                     probe::KeyAuth::Refused(why) => {
+                        // Refused after the handshake: the host key matched.
+                        inner.clear_host_key_change(&profile.id);
                         let record = inner.probes.entry(profile.id.clone()).or_default();
                         record.status.profile_id = profile.id.clone();
                         record.status.key_auth_at = Some(store::now());
@@ -346,6 +360,8 @@ fn main() {
             commands::list_known_hosts,
             commands::remove_known_hosts,
             commands::known_hosts_path,
+            commands::host_key_change,
+            commands::accept_host_key,
             commands::probe_statuses,
             commands::app_settings,
             commands::import_ssh_host,

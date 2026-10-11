@@ -41,6 +41,9 @@ pub enum KeyAuth {
     /// Distinct from `Refused` so the UI can show "unknown" rather than
     /// claiming passwordless login is broken.
     Unknown(String),
+    /// The server's host key no longer matches `known_hosts`, so we stopped
+    /// before offering any key.
+    HostKeyChanged(ssh::HostKeyChanged),
 }
 
 /// The keys worth offering to a host, best first: the one the connection is
@@ -114,6 +117,9 @@ pub async fn key_auth(
             )
         }),
         Err(e) => {
+            if let Some(change) = e.downcast_ref::<ssh::HostKeyChanged>() {
+                return KeyAuth::HostKeyChanged(change.clone());
+            }
             let msg = format!("{e:#}");
             // An unreachable host says nothing about whether a key would work.
             if msg.contains("timed out") || msg.contains("could not reach") {
@@ -205,6 +211,7 @@ mod tests {
         match outcome {
             KeyAuth::Works(path) => assert_eq!(path, PathBuf::from(&paths[2])),
             KeyAuth::Refused(w) | KeyAuth::Unknown(w) => panic!("no key found: {w}"),
+            KeyAuth::HostKeyChanged(c) => panic!("unexpected: {c}"),
         }
         assert_eq!(
             server

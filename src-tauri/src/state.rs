@@ -176,6 +176,9 @@ pub struct Inner {
     pub sessions: HashMap<String, LiveSession>,
     pub settings: Settings,
     pub probes: HashMap<String, ProbeRecord>,
+    /// Connections whose server presented a changed host key, with the key it
+    /// presented — the one the user is offered to trust in its place.
+    pub host_key_changes: HashMap<String, crate::ssh::HostKeyChanged>,
 }
 
 impl Inner {
@@ -188,6 +191,23 @@ impl Inner {
     /// Write the connections easySSH owns to `ez_config` in that directory.
     pub fn persist(&self) -> std::io::Result<()> {
         crate::ezconfig::save(&self.ssh_dir(), &self.profiles)
+    }
+
+    /// Remember that this connection's server presented a changed host key,
+    /// and flag it on the connection's health so the UI can offer the fix.
+    pub fn record_host_key_change(&mut self, profile_id: &str, change: crate::ssh::HostKeyChanged) {
+        let record = self.probes.entry(profile_id.to_string()).or_default();
+        record.status.profile_id = profile_id.to_string();
+        record.status.host_key_changed = true;
+        self.host_key_changes.insert(profile_id.to_string(), change);
+    }
+
+    /// The host key matches again — fixed here, by hand, or with `ssh-keygen -R`.
+    pub fn clear_host_key_change(&mut self, profile_id: &str) {
+        self.host_key_changes.remove(profile_id);
+        if let Some(record) = self.probes.get_mut(profile_id) {
+            record.status.host_key_changed = false;
+        }
     }
 
     pub fn profile(&self, id: &str) -> Option<&Profile> {
@@ -375,6 +395,7 @@ impl AppState {
             sessions: HashMap::new(),
             settings,
             probes: HashMap::new(),
+            host_key_changes: HashMap::new(),
         };
         // Populate the config-derived connections before the window opens, so
         // the sidebar is already complete on first paint.
@@ -485,6 +506,7 @@ mod tests {
                 ..Settings::default()
             },
             probes: HashMap::new(),
+            host_key_changes: HashMap::new(),
         }
     }
 

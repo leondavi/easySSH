@@ -7,8 +7,9 @@ use std::sync::Arc;
 use tauri::{AppHandle, Emitter, State};
 
 use crate::model::{
-    AuthMethod, CommandResult, KeyChoice, KeyInfo, KeyNotice, KnownHost, KnownHostRef, ProbeStatus,
-    Profile, SessionStatus, SetupResult, SshHostEntry, SshLocation, Tunnel,
+    AuthMethod, CommandResult, HostKeyChange, KeyChoice, KeyInfo, KeyNotice, KnownHost,
+    KnownHostRef, ProbeStatus, Profile, SessionStatus, SetupResult, SshHostEntry, SshLocation,
+    Tunnel,
 };
 use crate::state::{AppState, LiveSession};
 use crate::{ezconfig, keys, knownhosts, restore, ssh, sshconfig, store, terminal};
@@ -20,6 +21,34 @@ fn err<E: std::fmt::Display>(e: E) -> String {
 
 fn anyhow_err(e: anyhow::Error) -> String {
     format!("{e:#}")
+}
+
+/// Every connection's health, for the sidebar lamps.
+async fn emit_probes(app: &AppHandle, state: &AppState) {
+    let all: Vec<ProbeStatus> = {
+        let inner = state.inner.lock().await;
+        inner.probes.values().map(|r| r.status.clone()).collect()
+    };
+    let _ = app.emit("probe-status", all);
+}
+
+/// If `e` is a server presenting a changed host key, remember it against the
+/// connection so the UI can explain it and offer the fix.
+async fn note_host_key_change(
+    app: &AppHandle,
+    state: &AppState,
+    profile_id: &str,
+    e: &anyhow::Error,
+) {
+    let Some(change) = e.downcast_ref::<ssh::HostKeyChanged>() else {
+        return;
+    };
+    state
+        .inner
+        .lock()
+        .await
+        .record_host_key_change(profile_id, change.clone());
+    emit_probes(app, state).await;
 }
 
 /// Push the current status of one profile to the UI.
@@ -245,9 +274,23 @@ pub async fn connect(
         }
     }
 
-    let session = ssh::connect_profile(&profile, secret.as_deref(), &known_hosts)
-        .await
-        .map_err(anyhow_err)?;
+    let session = match ssh::connect_profile(&profile, secret.as_deref(), &known_hosts).await {
+        Ok(session) => session,
+        Err(e) => {
+            note_host_key_change(&app, &state, &profile_id, &e).await;
+            return Err(anyhow_err(e));
+        }
+    };
+    // Got through the handshake, so whatever key problem was on record is fixed.
+    let had_change = {
+        let mut inner = state.inner.lock().await;
+        let had = inner.host_key_changes.contains_key(&profile_id);
+        inner.clear_host_key_change(&profile_id);
+        had
+    };
+    if had_change {
+        emit_probes(&app, &state).await;
+    }
     let remote_description = ssh::describe_remote(&session.handle).await;
 
     // The secret goes with the session so the tunnel supervisor can rebuild it
@@ -433,6 +476,17 @@ pub async fn detect_passwordless(
             }
             Ok(Some(path))
         }
+        // Set Up would only hit the same wall; say why, so the fix is offered.
+        crate::probe::KeyAuth::HostKeyChanged(change) => {
+            let msg = change.to_string();
+            state
+                .inner
+                .lock()
+                .await
+                .record_host_key_change(&profile_id, change);
+            emit_probes(&app, &state).await;
+            Err(msg)
+        }
         // "No key works" and "could not tell" both mean: go ahead with Set Up.
         // A host that is down will fail there with a clearer message.
         _ => Ok(None),
@@ -504,7 +558,7 @@ pub async fn setup_key_auth(
         }
     }
 
-    let session = ssh::connect_password(
+    let session = match ssh::connect_password(
         &profile.host,
         profile.port,
         &profile.username,
@@ -512,7 +566,13 @@ pub async fn setup_key_auth(
         &known_hosts,
     )
     .await
-    .map_err(anyhow_err)?;
+    {
+        Ok(session) => session,
+        Err(e) => {
+            note_host_key_change(&app, &state, &profile_id, &e).await;
+            return Err(anyhow_err(e));
+        }
+    };
 
     let (already_present, remote_message) = ssh::install_public_key(&session.handle, &public_key)
         .await
@@ -1024,6 +1084,74 @@ pub async fn remove_known_hosts(
 ) -> Result<usize, String> {
     let dir = state.inner.lock().await.ssh_dir();
     knownhosts::remove(&dir, &entries).map_err(anyhow_err)
+}
+
+/// The changed host key on record for a connection, if any, with the stale
+/// `known_hosts` entries that accepting it would replace.
+#[tauri::command]
+pub async fn host_key_change(
+    state: State<'_, AppState>,
+    profile_id: String,
+) -> Result<Option<HostKeyChange>, String> {
+    let inner = state.inner.lock().await;
+    let Some(change) = inner.host_key_changes.get(&profile_id) else {
+        return Ok(None);
+    };
+    let dir = inner.ssh_dir();
+    let previous = knownhosts::conflicting(&dir, &change.host, change.port, &change.presented)
+        .map_err(anyhow_err)?;
+    Ok(Some(HostKeyChange {
+        host: change.host.clone(),
+        port: change.port,
+        algorithm: change.presented.algorithm().to_string(),
+        fingerprint: change.fingerprint(),
+        known_hosts: knownhosts::path_for(&dir).display().to_string(),
+        previous,
+    }))
+}
+
+/// Trust the key a connection's server now presents, in place of the one
+/// `known_hosts` recorded. Returns how many stale entries were removed.
+///
+/// Takes the fingerprint the user was shown, and records only the exact key
+/// that produced it — never whatever the server happens to present next.
+#[tauri::command]
+pub async fn accept_host_key(
+    app: AppHandle,
+    state: State<'_, AppState>,
+    profile_id: String,
+    fingerprint: String,
+) -> Result<usize, String> {
+    let removed = {
+        let mut inner = state.inner.lock().await;
+        let change = inner
+            .host_key_changes
+            .get(&profile_id)
+            .cloned()
+            .ok_or("there is no changed host key to accept for this connection")?;
+        if change.fingerprint() != fingerprint {
+            return Err(
+                "the server's key changed again since it was shown — review it again".into(),
+            );
+        }
+        let removed = knownhosts::replace(
+            &inner.ssh_dir(),
+            &change.host,
+            change.port,
+            &change.presented,
+        )
+        .map_err(anyhow_err)?;
+        inner.clear_host_key_change(&profile_id);
+        // Check key login again soon, now that the handshake can get through.
+        if let Some(record) = inner.probes.get_mut(&profile_id) {
+            record.next_key_check = None;
+            record.failures = 0;
+            record.status.key_auth_note = None;
+        }
+        removed
+    };
+    emit_probes(&app, &state).await;
+    Ok(removed)
 }
 
 /// The latest background health-check results, one per connection that has

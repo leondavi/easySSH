@@ -353,6 +353,10 @@ function renderDetail() {
       "tunnels will come back on their own."
     : "";
 
+  // Usually first met in a terminal as OpenSSH's "REMOTE HOST IDENTIFICATION
+  // HAS CHANGED" wall of text; here it comes with the way out.
+  $("hostkey-note").hidden = !probeOf(p.id).host_key_changed;
+
   $("check-tunnels").disabled = !st.connected;
 
   const fpRow = $("fingerprint-row");
@@ -763,15 +767,23 @@ async function toggleConnection() {
   if (needsSecret) {
     secretSheet(p, key?.encrypted && p.auth === "key");
   } else {
-    await doConnect(p, null);
+    try { await doConnect(p, null); } catch (e) { fail(e); }
   }
 }
 
+/** Connect, returning false when the attempt was handed over to the
+ *  changed-host-key sheet instead of failing. */
 async function doConnect(p, secret) {
   state.connecting.add(p.id);
   renderDetail();
   try {
-    const status = await invoke("connect", { profileId: p.id, secret });
+    let status;
+    try {
+      status = await invoke("connect", { profileId: p.id, secret });
+    } catch (e) {
+      if (await offerHostKeyFix(p, () => doConnect(p, secret))) return false;
+      throw e;
+    }
     state.statuses.set(p.id, status);
     const desc = await invoke("remote_description", { profileId: p.id });
     if (desc) state.descriptions.set(p.id, desc);
@@ -783,6 +795,7 @@ async function doConnect(p, secret) {
     } else {
       toast(`Connected to ${p.name}`, "success");
     }
+    return true;
   } finally {
     state.connecting.delete(p.id);
     renderSidebar();
@@ -798,8 +811,8 @@ function secretSheet(p, isPassphrase) {
     const go = h("button", { class: "btn btn-primary", text: "Connect" });
 
     bindSubmit(go, err, async () => {
-      await doConnect(p, input.value);
-      close();
+      // On false the changed-host-key sheet has replaced this one.
+      if (await doConnect(p, input.value)) close();
     });
     input.addEventListener("keydown", (e) => { if (e.key === "Enter") go.click(); });
 
@@ -832,7 +845,11 @@ async function setupPasswordless(p) {
     let found = null;
     try {
       found = await invoke("detect_passwordless", { profileId: p.id });
-    } catch { /* fall through to the sheet, which reports errors properly */ }
+    } catch {
+      // A changed host key would only stop Set Up too; offer that fix first.
+      // Anything else falls through to the sheet, which reports it properly.
+      if (await offerHostKeyFix(p, () => setupPasswordless(p))) return;
+    }
     finally {
       btn.disabled = false;
       btn.textContent = was;
@@ -1390,6 +1407,76 @@ function confirmDelete(p) {
   });
 }
 
+/* changed host key */
+
+/** If this connection's server presented a changed host key, show the review
+ *  sheet and return true. `retry` runs after the new key is trusted. */
+async function offerHostKeyFix(p, retry) {
+  let change;
+  try {
+    change = await invoke("host_key_change", { profileId: p.id });
+  } catch { return false; }
+  if (!change) return false;
+  hostKeySheet(p, change, retry);
+  return true;
+}
+
+function hostKeySheet(p, change, retry) {
+  sheet((host, close) => {
+    const target = change.port === 22 ? change.host : `[${change.host}]:${change.port}`;
+    const hostKeyFile = /rsa/.test(change.algorithm) ? "rsa"
+                      : /ecdsa/.test(change.algorithm) ? "ecdsa" : "ed25519";
+    const err = h("div", { class: "sheet-error", hidden: true });
+    const trust = h("button", { class: "btn btn-primary",
+                                text: retry ? "Trust New Key & Connect" : "Trust New Key" });
+
+    bindSubmit(trust, err, async () => {
+      const removed = await invoke("accept_host_key", {
+        profileId: p.id, fingerprint: change.fingerprint });
+      await reloadProbes();
+      close();
+      toast(`Trusted the new host key for ${p.name}` +
+            (removed ? ` — replaced ${removed} old entr${removed === 1 ? "y" : "ies"} ` +
+                       `(backup in known_hosts.easyssh-backup)` : ""), "success", 9000);
+      if (retry) await retry();
+    });
+
+    const previous = change.previous.length
+      ? change.previous.map((e) => h("div", { class: "fp-old" },
+          h("span", { class: "fp-label",
+                      text: `Recorded before  ·  ${e.algorithm}  ·  line ${e.line}` }),
+          h("span", { class: "mono", text: e.fingerprint })))
+      : [h("div", {},
+          h("span", { class: "fp-label", text: "Recorded before" }),
+          h("span", { text: "Already removed from known_hosts." }))];
+
+    mount(host,
+      h("h2", { text: `${p.name}: host key changed` }),
+      h("p", { class: "sheet-sub",
+               text: `${target} now identifies itself with a different key than the one ` +
+                     `known_hosts recorded. That is expected when the server was rebuilt, ` +
+                     `reinstalled or recreated — a cloud VM brought back from an image or ` +
+                     `template gets a fresh key. It is also what a man-in-the-middle looks like.` }),
+      h("div", { class: "fp-compare" },
+        ...previous,
+        h("div", {},
+          h("span", { class: "fp-label", text: `Presented now  ·  ${change.algorithm}` }),
+          h("span", { class: "mono", text: change.fingerprint }))),
+      h("p", { class: "sheet-note",
+               text: "Trust it only if you know the server changed. If you can, check the new " +
+                     "fingerprint against the server itself — its console or serial log in your " +
+                     `cloud provider, or ssh-keygen -lf /etc/ssh/ssh_host_${hostKeyFile}_key.pub ` +
+                     "run there. If nothing should have changed, cancel and ask the server's admin." }),
+      h("p", { class: "sheet-hint", style: "margin-left:0",
+               text: `Trusting it removes the old entry from ${change.known_hosts} (a backup ` +
+                     `is kept) and records this key, so the terminal's ssh works again too.` }),
+      err,
+      h("div", { class: "sheet-actions" },
+        h("button", { class: "btn", text: "Cancel", onclick: close }),
+        trust));
+  });
+}
+
 /* known hosts editor */
 
 async function knownHostsSheet() {
@@ -1557,6 +1644,14 @@ $("new-profile").addEventListener("click", () => profileSheet(null));
 $("empty-new").addEventListener("click", () => profileSheet(null));
 $("manage-keys").addEventListener("click", keysSheet);
 $("manage-hosts").addEventListener("click", knownHostsSheet);
+$("hostkey-btn").addEventListener("click", async () => {
+  const p = selected();
+  if (p && !(await offerHostKeyFix(p, null))) {
+    // Fixed elsewhere in the meantime (e.g. `ssh-keygen -R`).
+    await reloadProbes();
+    renderDetail();
+  }
+});
 $("connect-btn").addEventListener("click", toggleConnection);
 $("edit-btn").addEventListener("click", () => selected() && profileSheet(selected()));
 

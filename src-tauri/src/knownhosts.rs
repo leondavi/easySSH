@@ -199,6 +199,64 @@ pub fn remove(dir: &Path, refs: &[KnownHostRef]) -> Result<usize> {
     Ok(targets.len())
 }
 
+/// The entries that pin a different key, of the same type, for `host:port` —
+/// the ones a server with a changed key trips over.
+///
+/// Hashed entries cannot be read back, so they are matched by the key they
+/// carry against the keys recorded for this host. Revoked and CA lines are
+/// left alone: they are deliberate, not a stale record.
+pub fn conflicting(
+    dir: &Path,
+    host: &str,
+    port: u16,
+    presented: &PublicKey,
+) -> Result<Vec<KnownHost>> {
+    let path = path_for(dir);
+    let recorded = russh::keys::known_hosts::known_host_keys_path(host, port, &path)
+        .with_context(|| format!("reading {}", path.display()))?;
+    let stale: std::collections::HashSet<String> = recorded
+        .iter()
+        .filter(|(_, key)| key.algorithm() == presented.algorithm() && key != presented)
+        .map(|(_, key)| key.fingerprint(Default::default()).to_string())
+        .collect();
+    if stale.is_empty() {
+        return Ok(Vec::new());
+    }
+
+    let name = if port == 22 {
+        host.to_string()
+    } else {
+        format!("{host}:{port}")
+    };
+    Ok(list(dir, &[])?
+        .into_iter()
+        .filter(|e| e.parsed && e.marker.is_none() && stale.contains(&e.fingerprint))
+        .filter(|e| e.hashed || e.hosts.iter().any(|h| h.eq_ignore_ascii_case(&name)))
+        .collect())
+}
+
+/// Trust the key a server now presents in place of the one recorded for it:
+/// the stale entries are removed (with a backup, as `remove` keeps) and the
+/// new key is recorded. Returns how many stale lines were removed.
+pub fn replace(dir: &Path, host: &str, port: u16, presented: &PublicKey) -> Result<usize> {
+    let stale: Vec<KnownHostRef> = conflicting(dir, host, port, presented)?
+        .into_iter()
+        .map(|e| KnownHostRef {
+            line: e.line,
+            fingerprint: e.fingerprint,
+        })
+        .collect();
+    let removed = remove(dir, &stale)?;
+
+    let path = path_for(dir);
+    let known = russh::keys::check_known_hosts_path(host, port, presented, &path).unwrap_or(false);
+    if !known {
+        russh::keys::known_hosts::learn_known_hosts_path(host, port, presented, &path)
+            .with_context(|| format!("recording the new key in {}", path.display()))?;
+    }
+    Ok(removed)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -298,6 +356,53 @@ mod tests {
 
         // Nothing was touched.
         assert_eq!(list(&dir, &[]).unwrap().len(), 1);
+    }
+
+    fn key(seed: u8) -> PublicKey {
+        let private =
+            ssh_key::PrivateKey::from(ssh_key::private::Ed25519Keypair::from_seed(&[seed; 32]));
+        private.public_key().clone()
+    }
+
+    #[test]
+    fn a_changed_key_is_replaced_and_other_hosts_are_kept() {
+        let dir = tmpdir("replace");
+        let old = key(1).to_openssh().unwrap();
+        let other = key(2).to_openssh().unwrap();
+        write(
+            &dir,
+            &format!(
+                "# kept\n\
+                 keep.example {other}\n\
+                 146.148.56.95 {old}\n\
+                 [146.148.56.95]:2222 {old}\n"
+            ),
+        );
+        let new = key(3);
+
+        let stale = conflicting(&dir, "146.148.56.95", 22, &new).unwrap();
+        assert_eq!(
+            stale.len(),
+            1,
+            "only the port-22 entry conflicts: {stale:?}"
+        );
+        assert_eq!(stale[0].line, 3);
+
+        assert_eq!(replace(&dir, "146.148.56.95", 22, &new).unwrap(), 1);
+
+        // The new key is trusted, the other host and the other port untouched.
+        let path = path_for(&dir);
+        assert!(russh::keys::check_known_hosts_path("146.148.56.95", 22, &new, &path).unwrap());
+        let text = fs::read_to_string(&path).unwrap();
+        assert!(text.contains("keep.example"));
+        assert!(text.contains("[146.148.56.95]:2222"));
+        assert!(conflicting(&dir, "146.148.56.95", 22, &new)
+            .unwrap()
+            .is_empty());
+
+        // Replacing again changes nothing and does not add a duplicate.
+        assert_eq!(replace(&dir, "146.148.56.95", 22, &new).unwrap(), 0);
+        assert_eq!(fs::read_to_string(&path).unwrap(), text);
     }
 
     #[test]

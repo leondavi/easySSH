@@ -311,6 +311,21 @@ pub struct KnownHostRef {
     pub fingerprint: String,
 }
 
+/// A server whose host key no longer matches `known_hosts`, as shown to the
+/// user so they can decide whether to trust the new key.
+#[derive(Debug, Clone, Serialize)]
+pub struct HostKeyChange {
+    pub host: String,
+    pub port: u16,
+    pub algorithm: String,
+    /// The fingerprint the server presents now.
+    pub fingerprint: String,
+    /// The `known_hosts` file the stale entries are in.
+    pub known_hosts: String,
+    /// The entries recording the old key, which accepting will remove.
+    pub previous: Vec<KnownHost>,
+}
+
 /// The result of running one command on a connected host.
 ///
 /// Returned in full rather than as a single string: a command that prints
@@ -341,4 +356,7 @@ pub struct ProbeStatus {
     /// The key found to log in without a password, when one did — which may
     /// not be the one the connection was set to use.
     pub passwordless_key: Option<String>,
+    /// The server presented a host key that does not match `known_hosts`.
+    /// Details, and the fix, come from the `host_key_change` command.
+    pub host_key_changed: bool,
 }
