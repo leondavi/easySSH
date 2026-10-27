@@ -9,7 +9,7 @@ use tauri::{AppHandle, Emitter, State};
 use crate::model::{
     AuthMethod, CommandResult, HostKeyChange, KeyChoice, KeyInfo, KeyNotice, KnownHost,
     KnownHostRef, ProbeStatus, Profile, SessionStatus, SetupResult, SshHostEntry, SshLocation,
-    Tunnel,
+    TerminalApp, Tunnel,
 };
 use crate::state::{AppState, LiveSession};
 use crate::{ezconfig, keys, knownhosts, restore, ssh, sshconfig, store, terminal};
@@ -777,14 +777,14 @@ pub async fn open_terminal(
     profile_id: String,
     include_tunnels: bool,
 ) -> Result<String, String> {
-    let (profile, forwarded) = {
+    let (profile, forwarded, preferred) = {
         let inner = state.inner.lock().await;
         let profile = inner
             .profile(&profile_id)
             .ok_or("that connection no longer exists")?
             .clone();
         let forwarded = live_forwarded_ports(&inner, &profile);
-        (profile, forwarded)
+        (profile, forwarded, inner.settings.terminal.clone())
     };
     // The system ssh is about to take over, and unlike russh it refuses a key
     // anyone else can read. This is the moment that matters most.
@@ -793,7 +793,30 @@ pub async fn open_terminal(
             tidy_key(&app, path);
         }
     }
-    terminal::open(&profile, include_tunnels, &forwarded).map_err(anyhow_err)
+    terminal::open(&profile, include_tunnels, &forwarded, preferred.as_deref()).map_err(anyhow_err)
+}
+
+/// The terminal apps installed here that the Terminal button can open.
+#[tauri::command]
+pub async fn list_terminals() -> Result<Vec<TerminalApp>, String> {
+    // Probing the disk is quick, but not something to do on the async runtime.
+    tauri::async_runtime::spawn_blocking(terminal::available)
+        .await
+        .map_err(err)
+}
+
+/// Choose the terminal the Terminal button opens. `None` lets easySSH pick.
+#[tauri::command]
+pub async fn set_terminal(state: State<'_, AppState>, id: Option<String>) -> Result<(), String> {
+    let id = id.filter(|i| !i.is_empty());
+    if let Some(i) = &id {
+        if !terminal::available().iter().any(|t| &t.id == i) {
+            return Err(format!("{i} is not installed on this machine"));
+        }
+    }
+    let mut inner = state.inner.lock().await;
+    inner.settings.terminal = id;
+    store::save_settings(&inner.settings).map_err(err)
 }
 
 /// The local ports this connection is already forwarding from inside easySSH.

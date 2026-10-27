@@ -265,6 +265,10 @@ pub struct Settings {
     /// the user to notice is the behaviour this setting exists to replace.
     #[serde(default = "yes")]
     pub auto_restore_tunnels: bool,
+    /// The terminal app the Terminal button opens, by the id `terminal::available`
+    /// gives it. `None` leaves the choice to easySSH, as before this existed.
+    #[serde(default)]
+    pub terminal: Option<String>,
 }
 
 /// `serde` needs a function to default a `bool` to true.
@@ -278,8 +282,18 @@ impl Default for Settings {
             ssh_dir: None,
             show_config_hosts: true,
             auto_restore_tunnels: true,
+            terminal: None,
         }
     }
+}
+
+/// A terminal app installed on this machine that easySSH knows how to drive.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+pub struct TerminalApp {
+    /// Stable handle stored in the settings.
+    pub id: String,
+    /// What the settings menu calls it.
+    pub name: String,
 }
 
 /// One entry in a `known_hosts` file.

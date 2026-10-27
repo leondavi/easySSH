@@ -8,7 +8,7 @@ use std::process::Command;
 
 use anyhow::Result;
 
-use crate::model::{AuthMethod, Profile};
+use crate::model::{AuthMethod, Profile, TerminalApp};
 
 /// Build the argument list for `ssh`, including any tunnels the profile defines.
 ///
@@ -104,68 +104,244 @@ fn applescript_quote(s: &str) -> String {
 }
 
 /// Open the user's terminal with the SSH session already running.
-pub fn open(profile: &Profile, include_tunnels: bool, already_forwarded: &[u16]) -> Result<String> {
+///
+/// `preferred` is the terminal picked in settings, by the id [`available`]
+/// gave it. `None` — or a choice that has since been uninstalled — leaves the
+/// pick to easySSH, which is how the button behaved before there was a choice.
+pub fn open(
+    profile: &Profile,
+    include_tunnels: bool,
+    already_forwarded: &[u16],
+    preferred: Option<&str>,
+) -> Result<String> {
     let command = ssh_command_line(profile, include_tunnels, already_forwarded);
-    launch(&command)?;
+    let preferred = preferred.filter(|id| available().iter().any(|t| t.id == *id));
+    launch(&command, preferred)?;
     Ok(command)
 }
 
+/// What the terminal runs: the ssh command, then a shell once it exits.
+///
+/// Dropping into a shell instead of closing the window with ssh is what
+/// `cmd /K` does on Windows and what Terminal.app does on macOS, and it is the
+/// difference between reading why a connection failed and watching the window
+/// vanish.
+#[cfg(unix)]
+fn shell_script(command: &str) -> String {
+    format!("{command}; exec ${{SHELL:-sh}}")
+}
+
+/// Whether `bin` is an executable on `$PATH`. A path is checked as given.
+#[cfg(unix)]
+#[cfg_attr(target_os = "macos", allow(dead_code))]
+fn on_path(bin: &str) -> bool {
+    use std::os::unix::fs::PermissionsExt as _;
+    use std::path::{Path, PathBuf};
+
+    let runnable = |p: &Path| {
+        std::fs::metadata(p)
+            .map(|m| m.is_file() && m.permissions().mode() & 0o111 != 0)
+            .unwrap_or(false)
+    };
+    if bin.contains('/') {
+        return runnable(Path::new(bin));
+    }
+    std::env::var_os("PATH")
+        .map(|paths| std::env::split_paths(&paths).any(|dir: PathBuf| runnable(&dir.join(bin))))
+        .unwrap_or(false)
+}
+
+// ------------------------------------------------------------------ macOS
+
+/// The terminals easySSH can drive on macOS: id, name, app bundle.
 #[cfg(target_os = "macos")]
-fn launch(command: &str) -> Result<()> {
-    use anyhow::{anyhow, Context as _};
+const MAC_APPS: &[(&str, &str, &str)] = &[
+    ("terminal", "Terminal", "Terminal.app"),
+    ("iterm", "iTerm2", "iTerm.app"),
+    ("ghostty", "Ghostty", "Ghostty.app"),
+    ("wezterm", "WezTerm", "WezTerm.app"),
+    ("alacritty", "Alacritty", "Alacritty.app"),
+    ("kitty", "kitty", "kitty.app"),
+];
 
-    // Prefer iTerm when the user has it, then fall back to Terminal.app.
-    let script = format!(
-        r#"
-if application "iTerm" is running then
-    tell application "iTerm"
-        activate
-        try
-            tell current window to create tab with default profile
-        on error
-            create window with default profile
-        end try
-        tell current session of current window to write text {cmd}
-    end tell
-else
-    tell application "Terminal"
-        activate
-        do script {cmd}
-    end tell
-end if
-"#,
-        cmd = applescript_quote(command)
-    );
+/// Where an app bundle is installed, if it is.
+#[cfg(target_os = "macos")]
+fn app_bundle(bundle: &str) -> Option<std::path::PathBuf> {
+    use std::path::PathBuf;
 
-    let status = Command::new("osascript")
-        .arg("-e")
-        .arg(&script)
-        .status()
-        .context("running osascript")?;
+    let mut dirs = vec![
+        PathBuf::from("/Applications"),
+        PathBuf::from("/Applications/Utilities"),
+        PathBuf::from("/System/Applications/Utilities"),
+    ];
+    if let Some(home) = std::env::var_os("HOME") {
+        dirs.push(PathBuf::from(home).join("Applications"));
+    }
+    dirs.into_iter()
+        .map(|d| d.join(bundle))
+        .find(|p| p.is_dir())
+}
 
-    if !status.success() {
-        // iTerm may exist but be scriptably unhappy; Terminal.app is the safe floor.
-        let fallback = format!(
-            r#"tell application "Terminal"
+/// The terminals installed on this machine, for the settings menu.
+#[cfg(target_os = "macos")]
+pub fn available() -> Vec<TerminalApp> {
+    MAC_APPS
+        .iter()
+        .filter(|(_, _, bundle)| app_bundle(bundle).is_some())
+        .map(|(id, name, _)| TerminalApp {
+            id: id.to_string(),
+            name: name.to_string(),
+        })
+        .collect()
+}
+
+#[cfg(target_os = "macos")]
+fn terminal_app_script(cmd: &str) -> String {
+    format!(
+        r#"tell application "Terminal"
     activate
     do script {cmd}
-end tell"#,
-            cmd = applescript_quote(command)
-        );
-        let status = Command::new("osascript")
-            .arg("-e")
-            .arg(&fallback)
-            .status()
-            .context("running osascript")?;
-        if !status.success() {
-            return Err(anyhow!("macOS refused to open Terminal"));
-        }
+end tell"#
+    )
+}
+
+#[cfg(target_os = "macos")]
+fn iterm_script(cmd: &str) -> String {
+    format!(
+        r#"tell application "iTerm"
+    activate
+    try
+        tell current window to create tab with default profile
+    on error
+        create window with default profile
+    end try
+    tell current session of current window to write text {cmd}
+end tell"#
+    )
+}
+
+#[cfg(target_os = "macos")]
+fn osascript(script: &str) -> bool {
+    Command::new("osascript")
+        .arg("-e")
+        .arg(script)
+        .status()
+        .map(|s| s.success())
+        .unwrap_or(false)
+}
+
+#[cfg(target_os = "macos")]
+fn launch(command: &str, preferred: Option<&str>) -> Result<()> {
+    use anyhow::anyhow;
+
+    let cmd = applescript_quote(command);
+    let opened = match preferred {
+        // Prefer iTerm when the user has it open, then fall back to Terminal.app.
+        None => osascript(&format!(
+            "if application \"iTerm\" is running then\n{}\nelse\n{}\nend if",
+            iterm_script(&cmd),
+            terminal_app_script(&cmd)
+        )),
+        Some("terminal") => osascript(&terminal_app_script(&cmd)),
+        Some("iterm") => osascript(&iterm_script(&cmd)),
+        Some(id) => launch_mac_app(id, command),
+    };
+    if opened {
+        return Ok(());
     }
-    Ok(())
+
+    // The chosen app may be installed but scriptably unhappy; Terminal.app is
+    // the safe floor.
+    if osascript(&terminal_app_script(&cmd)) {
+        return Ok(());
+    }
+    Err(anyhow!("macOS refused to open Terminal"))
+}
+
+/// Start one of the terminals that take the command on their command line
+/// rather than through AppleScript.
+#[cfg(target_os = "macos")]
+fn launch_mac_app(id: &str, command: &str) -> bool {
+    let Some(bundle) = MAC_APPS
+        .iter()
+        .find(|(i, _, _)| *i == id)
+        .and_then(|(_, _, b)| app_bundle(b))
+    else {
+        return false;
+    };
+    let binary = |name: &str| Command::new(bundle.join("Contents/MacOS").join(name));
+    let script = shell_script(command);
+
+    let mut cmd = match id {
+        // Ghostty will not open a window when its binary is started directly
+        // on macOS; it has to come up through Launch Services.
+        "ghostty" => {
+            let mut c = Command::new("open");
+            c.arg("-na").arg(&bundle).args(["--args", "-e"]);
+            c
+        }
+        "wezterm" => {
+            let mut c = binary("wezterm");
+            c.args(["start", "--"]);
+            c
+        }
+        "alacritty" => {
+            let mut c = binary("alacritty");
+            c.arg("-e");
+            c
+        }
+        "kitty" => binary("kitty"),
+        _ => return false,
+    };
+    cmd.args(["sh", "-c", &script]);
+    cmd.spawn().map(started).unwrap_or(false)
+}
+
+// ---------------------------------------------------------------- Windows
+
+/// The terminals easySSH can drive on Windows: id, name.
+#[cfg(target_os = "windows")]
+const WINDOWS_TERMINALS: &[(&str, &str)] = &[
+    ("wt", "Windows Terminal"),
+    ("cmd", "Command Prompt"),
+    ("powershell", "Windows PowerShell"),
+    ("pwsh", "PowerShell 7"),
+];
+
+/// Whether `exe` is on `%PATH%`.
+///
+/// `symlink_metadata`, not `exists`: wt.exe is an app execution alias, a
+/// reparse point that following would fail on even though it runs fine.
+#[cfg(target_os = "windows")]
+fn on_path(exe: &str) -> bool {
+    std::env::var_os("PATH")
+        .map(|paths| {
+            std::env::split_paths(&paths)
+                .any(|dir| std::fs::symlink_metadata(dir.join(exe)).is_ok())
+        })
+        .unwrap_or(false)
+}
+
+/// The terminals installed on this machine, for the settings menu.
+#[cfg(target_os = "windows")]
+pub fn available() -> Vec<TerminalApp> {
+    WINDOWS_TERMINALS
+        .iter()
+        .filter(|(id, _)| match *id {
+            "wt" => on_path("wt.exe"),
+            "pwsh" => on_path("pwsh.exe"),
+            // Part of Windows itself.
+            _ => true,
+        })
+        .map(|(id, name)| TerminalApp {
+            id: id.to_string(),
+            name: name.to_string(),
+        })
+        .collect()
 }
 
 #[cfg(target_os = "windows")]
-fn launch(command: &str) -> Result<()> {
+fn launch(command: &str, preferred: Option<&str>) -> Result<()> {
     use anyhow::Context as _;
     use std::os::windows::process::CommandExt;
 
@@ -176,15 +352,27 @@ fn launch(command: &str) -> Result<()> {
 
     // `spawn`, not `status`: the terminal stays open for as long as the user
     // wants it, and waiting on it would block the command that opened it.
-    //
-    // Windows Terminal gives tabs and a modern renderer. Spawning it directly
-    // rather than through `cmd /C start` means a missing wt.exe surfaces as a
-    // plain NotFound error instead of a shell quoting puzzle.
-    if Command::new("wt.exe")
-        .args(["cmd", "/K", command])
-        .spawn()
-        .is_ok()
-    {
+    let console = |exe: &str, args: &[&str]| {
+        Command::new(exe)
+            .args(args)
+            .creation_flags(CREATE_NEW_CONSOLE)
+            .spawn()
+            .is_ok()
+    };
+
+    let opened = match preferred {
+        Some("cmd") => console("cmd", &["/K", command]),
+        // The command is quoted with `"`, which PowerShell reads the same way.
+        Some(ps @ ("powershell" | "pwsh")) => console(ps, &["-NoExit", "-Command", command]),
+        // Windows Terminal gives tabs and a modern renderer. Spawning it
+        // directly rather than through `cmd /C start` means a missing wt.exe
+        // surfaces as a plain NotFound error instead of a shell quoting puzzle.
+        _ => Command::new("wt.exe")
+            .args(["cmd", "/K", command])
+            .spawn()
+            .is_ok(),
+    };
+    if opened {
         return Ok(());
     }
 
@@ -197,18 +385,82 @@ fn launch(command: &str) -> Result<()> {
     Ok(())
 }
 
-#[cfg(all(not(target_os = "macos"), not(target_os = "windows")))]
-fn launch(command: &str) -> Result<()> {
+// ------------------------------------------------------- Linux and the BSDs
+
+/// The terminals easySSH knows, in the order it tries them: the binary, what
+/// the settings menu calls it, and the arguments that make it run a command.
+/// The flag is not interchangeable between families: several of these accept
+/// the wrong one, open, and then run nothing.
+#[cfg(unix)]
+#[cfg_attr(target_os = "macos", allow(dead_code))]
+const TERMINALS: &[(&str, &str, &[&str])] = &[
+    // The freedesktop launcher: it resolves the user's configured terminal
+    // itself, so where it exists it is more likely right than our guesses.
+    (
+        "xdg-terminal-exec",
+        "System default (xdg-terminal-exec)",
+        &[],
+    ),
+    // Debian's alternatives entry — on Debian and Ubuntu this is whatever
+    // terminal the user actually chose.
+    (
+        "x-terminal-emulator",
+        "Debian default (x-terminal-emulator)",
+        GENERIC,
+    ),
+    // GTK family. `-e` is deprecated in these and takes a single string,
+    // so it would swallow `sh` and leave `-c` behind as an unknown option;
+    // `--` ends option parsing and passes the argv through intact.
+    ("gnome-terminal", "GNOME Terminal", &["--"]),
+    ("kgx", "GNOME Console", &["--"]),
+    ("ptyxis", "Ptyxis", &["--"]),
+    ("mate-terminal", "MATE Terminal", &["--"]),
+    // These spell the same idea `-x`: everything after it is the command.
+    ("xfce4-terminal", "Xfce Terminal", &["-x"]),
+    ("terminator", "Terminator", &["-x"]),
+    ("tilix", "Tilix", &["-e"]),
+    ("konsole", "Konsole", GENERIC),
+    ("qterminal", "QTerminal", GENERIC),
+    ("deepin-terminal", "Deepin Terminal", GENERIC),
+    ("alacritty", "Alacritty", GENERIC),
+    ("wezterm", "WezTerm", &["start", "--"]),
+    // kitty and foot take the command straight after their own options,
+    // with no flag introducing it.
+    ("kitty", "kitty", &[]),
+    ("foot", "foot", &[]),
+    ("urxvt", "rxvt-unicode", GENERIC),
+    ("rxvt", "rxvt", GENERIC),
+    ("st", "st", GENERIC),
+    ("xterm", "xterm", GENERIC),
+];
+
+/// `-e` is the flag Debian policy requires of a terminal emulator, so it is
+/// the right guess for one we were told about but know nothing else of.
+#[cfg(unix)]
+#[cfg_attr(target_os = "macos", allow(dead_code))]
+const GENERIC: &[&str] = &["-e"];
+
+/// The terminals installed on this machine, for the settings menu.
+#[cfg(all(unix, not(target_os = "macos")))]
+pub fn available() -> Vec<TerminalApp> {
+    TERMINALS
+        .iter()
+        .filter(|(bin, _, _)| on_path(bin))
+        .map(|(bin, name, _)| TerminalApp {
+            id: bin.to_string(),
+            name: name.to_string(),
+        })
+        .collect()
+}
+
+#[cfg(all(unix, not(target_os = "macos")))]
+fn launch(command: &str, preferred: Option<&str>) -> Result<()> {
     use anyhow::anyhow;
 
-    // Drop into a shell when ssh exits instead of closing the window with it:
-    // that is what `cmd /K` does on Windows and what Terminal.app does on
-    // macOS, and it is the difference between reading why a connection failed
-    // and watching the window vanish.
-    let script = format!("{command}; exec ${{SHELL:-sh}}");
+    let script = shell_script(command);
 
     let mut tried: Vec<String> = Vec::new();
-    for (bin, prefix) in candidates() {
+    for (bin, prefix) in candidates(preferred) {
         let mut cmd = Command::new(&bin);
         cmd.args(&prefix).arg("sh").arg("-c").arg(&script);
         let Ok(child) = cmd.spawn() else {
@@ -228,90 +480,59 @@ fn launch(command: &str) -> Result<()> {
         ));
     }
     Err(anyhow!(
-        "{} would not open. Set $TERMINAL to the terminal you use, or copy the \
-         command above and run it yourself.",
+        "{} would not open. Choose another terminal under the Terminal card, \
+         set $TERMINAL to the one you use, or copy the command above and run \
+         it yourself.",
         tried.join(", ")
     ))
 }
 
+/// The arguments that make `term` run a command. It may be given as a path,
+/// and is recognised by name either way; one we do not know gets `-e`.
+#[cfg(unix)]
+#[cfg_attr(target_os = "macos", allow(dead_code))]
+fn args_for(term: &str) -> Vec<String> {
+    let name = std::path::Path::new(term)
+        .file_name()
+        .and_then(|f| f.to_str());
+    TERMINALS
+        .iter()
+        .find(|(bin, _, _)| Some(*bin) == name)
+        .map(|(_, _, args)| *args)
+        .unwrap_or(GENERIC)
+        .iter()
+        .map(|a| a.to_string())
+        .collect()
+}
+
 /// The terminals to try, in order, each with the arguments that make it run a
-/// command. The flag is not interchangeable between families: several of these
-/// accept the wrong one, open, and then run nothing.
+/// command: the one chosen in settings, then `$TERMINAL`, then every one we
+/// know, so a choice that will not open still leaves the user a window.
 ///
 /// Built on every unix, not only where it is used: this is the one launcher
 /// with no OS API to lean on, and compiling it on macOS too means its tests
 /// run wherever they are run at all.
 #[cfg(unix)]
 #[cfg_attr(target_os = "macos", allow(dead_code))]
-fn candidates() -> Vec<(String, Vec<String>)> {
-    // `-e` is the flag Debian policy requires of a terminal emulator, so it is
-    // the right guess for one we were told about but know nothing else of.
-    const GENERIC: &[&str] = &["-e"];
-
-    const TERMINALS: &[(&str, &[&str])] = &[
-        // The freedesktop launcher: it resolves the user's configured terminal
-        // itself, so where it exists it is more likely right than our guesses.
-        ("xdg-terminal-exec", &[]),
-        // Debian's alternatives entry — on Debian and Ubuntu this is whatever
-        // terminal the user actually chose.
-        ("x-terminal-emulator", GENERIC),
-        // GTK family. `-e` is deprecated in these and takes a single string,
-        // so it would swallow `sh` and leave `-c` behind as an unknown option;
-        // `--` ends option parsing and passes the argv through intact.
-        ("gnome-terminal", &["--"]),
-        ("kgx", &["--"]),
-        ("ptyxis", &["--"]),
-        ("mate-terminal", &["--"]),
-        // These spell the same idea `-x`: everything after it is the command.
-        ("xfce4-terminal", &["-x"]),
-        ("terminator", &["-x"]),
-        ("tilix", &["-e"]),
-        ("konsole", GENERIC),
-        ("qterminal", GENERIC),
-        ("deepin-terminal", GENERIC),
-        ("alacritty", GENERIC),
-        ("wezterm", &["start", "--"]),
-        // kitty and foot take the command straight after their own options,
-        // with no flag introducing it.
-        ("kitty", &[]),
-        ("foot", &[]),
-        ("urxvt", GENERIC),
-        ("rxvt", GENERIC),
-        ("st", GENERIC),
-        ("xterm", GENERIC),
-    ];
-
+fn candidates(preferred: Option<&str>) -> Vec<(String, Vec<String>)> {
     let mut out: Vec<(String, Vec<String>)> = Vec::new();
-
-    // An explicit choice beats anything we would work out for ourselves. It
-    // may name a terminal we know, in which case use the arguments we know
-    // are right for it rather than the generic guess.
-    if let Ok(term) = std::env::var("TERMINAL") {
+    let mut push = |term: &str| {
         let term = term.trim();
-        if !term.is_empty() {
-            let known = TERMINALS
-                .iter()
-                .find(|(bin, _)| {
-                    Some(*bin)
-                        == std::path::Path::new(term)
-                            .file_name()
-                            .and_then(|f| f.to_str())
-                })
-                .map(|(_, args)| *args)
-                .unwrap_or(GENERIC);
-            out.push((
-                term.to_string(),
-                known.iter().map(|a| a.to_string()).collect(),
-            ));
+        if !term.is_empty() && !out.iter().any(|(b, _)| b == term) {
+            out.push((term.to_string(), args_for(term)));
         }
-    }
+    };
 
-    out.extend(TERMINALS.iter().map(|(bin, args)| {
-        (
-            bin.to_string(),
-            args.iter().map(|a| a.to_string()).collect(),
-        )
-    }));
+    // An explicit choice beats anything we would work out for ourselves.
+    if let Some(term) = preferred {
+        push(term);
+    }
+    if let Ok(term) = std::env::var("TERMINAL") {
+        push(&term);
+    }
+    for (bin, _, _) in TERMINALS {
+        push(bin);
+    }
     out
 }
 
@@ -322,7 +543,6 @@ fn candidates() -> Vec<(String, Vec<String>)> {
 /// treating that as success is how easySSH could report an open terminal while
 /// the user saw no window at all — with the remaining candidates never tried.
 #[cfg(unix)]
-#[cfg_attr(target_os = "macos", allow(dead_code))]
 fn started(mut child: std::process::Child) -> bool {
     use std::time::{Duration, Instant};
 
@@ -407,7 +627,7 @@ mod tests {
     #[cfg(unix)]
     #[test]
     fn the_gtk_terminals_get_argv_passed_through_not_a_deprecated_flag() {
-        let all = candidates();
+        let all = candidates(None);
         for name in ["gnome-terminal", "kgx", "ptyxis", "mate-terminal"] {
             let args = all
                 .iter()
@@ -427,16 +647,58 @@ mod tests {
     fn the_terminal_env_var_is_tried_first_when_it_is_set() {
         // SAFETY: the variable is set, read back and removed here alone.
         unsafe { std::env::remove_var("TERMINAL") };
-        assert_eq!(candidates()[0].0, "xdg-terminal-exec");
+        assert_eq!(candidates(None)[0].0, "xdg-terminal-exec");
 
         unsafe { std::env::set_var("TERMINAL", "/usr/bin/kitty") };
-        let chosen = candidates()[0].clone();
+        let chosen = candidates(None)[0].clone();
+        // The choice made in easySSH's settings outranks the environment.
+        let picked = candidates(Some("konsole"));
         unsafe { std::env::remove_var("TERMINAL") };
 
         assert_eq!(chosen.0, "/usr/bin/kitty");
         // Recognised by name even when given as a path: kitty takes the
         // command with no flag introducing it, so `-e` would break it.
         assert!(chosen.1.is_empty(), "{:?}", chosen.1);
+
+        assert_eq!(picked[0], ("konsole".to_string(), vec!["-e".to_string()]));
+        assert_eq!(picked[1].0, "/usr/bin/kitty");
+    }
+
+    /// A chosen terminal is tried once, with its own arguments, and the rest
+    /// stay behind it as a fallback.
+    #[cfg(unix)]
+    #[test]
+    fn a_chosen_terminal_leads_and_is_not_tried_twice() {
+        let all = candidates(Some("gnome-terminal"));
+        assert_eq!(
+            all[0],
+            ("gnome-terminal".to_string(), vec!["--".to_string()])
+        );
+        assert_eq!(all.iter().filter(|(b, _)| b == "gnome-terminal").count(), 1);
+        assert!(all.iter().any(|(b, _)| b == "xterm"));
+    }
+
+    /// Only terminals actually installed are offered, and `sh` stands in for
+    /// one: it is on every unix PATH and nowhere else in this test.
+    #[cfg(unix)]
+    #[test]
+    fn on_path_finds_what_is_installed_and_nothing_else() {
+        assert!(on_path("sh"));
+        assert!(on_path("/bin/sh"));
+        assert!(!on_path("easyssh-no-such-terminal"));
+    }
+
+    /// What `available` lists is what the setting stores and `open` accepts:
+    /// every entry must be one the launcher knows.
+    #[test]
+    fn available_terminals_have_distinct_ids() {
+        let all = available();
+        let mut ids: Vec<_> = all.iter().map(|t| t.id.clone()).collect();
+        ids.sort();
+        ids.dedup();
+        assert_eq!(ids.len(), all.len(), "{all:?}");
+        #[cfg(target_os = "macos")]
+        assert!(all.iter().any(|t| t.id == "terminal"), "{all:?}");
     }
 
     /// The bug this replaced: a terminal that exits at once having run nothing

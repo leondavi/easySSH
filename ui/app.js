@@ -53,6 +53,8 @@ const state = {
   configHosts: [],      // Host blocks parsed from the focused config
   showConfigHosts: true, // list hosts read from the ssh config alongside our own
   autoRestore: true,    // watch live forwards and rebuild the ones that die
+  terminal: "",         // the terminal app the button opens; "" lets easySSH pick
+  terminals: [],        // the terminal apps installed here
   files: new Map(),     // profileId -> what the Files card has chosen so far
   publish: new Map(),   // profileId -> what it is sharing by link, if anything
   filesOpen: loadPref("filesOpen", false),  // Files card expanded
@@ -652,9 +654,23 @@ async function reloadSettings() {
     const s = await invoke("app_settings");
     state.showConfigHosts = s.show_config_hosts !== false;
     state.autoRestore = s.auto_restore_tunnels !== false;
+    state.terminal = s.terminal ?? "";
   } catch { /* keep the current value */ }
+  try {
+    state.terminals = await invoke("list_terminals");
+  } catch { state.terminals = []; }
   $("show-config-hosts").checked = state.showConfigHosts;
   $("auto-restore").checked = state.autoRestore;
+  renderTerminalPicker();
+}
+
+function renderTerminalPicker() {
+  const sel = $("term-app");
+  sel.replaceChildren(
+    h("option", { value: "", text: "Automatic" }),
+    ...state.terminals.map((t) => h("option", { value: t.id, text: t.name })));
+  // A choice that has since been uninstalled is opened as Automatic, so say so.
+  sel.value = state.terminals.some((t) => t.id === state.terminal) ? state.terminal : "";
 }
 
 async function reloadConfigHosts() {
@@ -1789,6 +1805,19 @@ $("terminal-btn").addEventListener("click", async () => {
   try {
     await invoke("open_terminal", { profileId: p.id, includeTunnels: $("term-tunnels").checked });
   } catch (e) { fail(e); }
+});
+
+$("term-app").addEventListener("change", async (e) => {
+  const id = e.target.value;
+  try {
+    await invoke("set_terminal", { id: id || null });
+    state.terminal = id;
+    const name = state.terminals.find((t) => t.id === id)?.name;
+    toast(name ? `Terminal opens in ${name}` : "easySSH picks the terminal");
+  } catch (err) {
+    fail(err);
+    renderTerminalPicker();   // the setting did not stick
+  }
 });
 
 $("term-tunnels").addEventListener("change", () => {

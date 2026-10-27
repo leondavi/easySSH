@@ -349,6 +349,8 @@ fn main() {
             commands::stop_tunnel,
             commands::open_terminal,
             commands::terminal_preview,
+            commands::list_terminals,
+            commands::set_terminal,
             commands::run_command,
             commands::list_ssh_locations,
             commands::set_ssh_location,

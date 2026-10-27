@@ -619,6 +619,10 @@ input, select, textarea { user-select: text; }
 .checkbox input { accent-color: var(--accent); width: 13px; height: 13px; }
 .location-toggle { margin-top: 8px; }
 
+/* The terminal picker: one app-wide choice, sat above the command it will run. */
+.term-app-row { display: flex; align-items: center; gap: 8px; margin-bottom: 10px; font-size: 12.5px; color: var(--text-2); }
+.term-app-row select { flex: 0 1 240px; }
+
 /* callout */
 
 .callout {
