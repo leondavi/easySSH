@@ -1,0 +1,20 @@
+Architectures: amd64 
+Codename: stable
+Components: main
+Date: Tue, 27 Oct 2026 23:22:54 +0000
+Description: easySSH packages
+Label: easySSH
+Origin: easySSH
+Suite: stable
+MD5Sum:
+ 333c762e04088da3d159e928b74d1025             1588 main/binary-amd64/Packages
+ fef8b0f2c12ca6112bd8cabcd7319c37              750 main/binary-amd64/Packages.gz
+SHA1:
+ 37e56e0739b6864a69ecea56a66f4f7756ab4a60             1588 main/binary-amd64/Packages
+ dd649f9ee597206c6784dd7c8a1f7273140052eb              750 main/binary-amd64/Packages.gz
+SHA256:
+ 706c0b5a163fff3411c3ec37e406f06fc61ebf891ff9658ae3ce02b81740eee3             1588 main/binary-amd64/Packages
+ 005f3f57829ad394e3156b3d246ab5cc3c02d04e467dce4cdfa163c2e486a2e1              750 main/binary-amd64/Packages.gz
+SHA512:
+ dcaa0e46cff00b9c0501824b0dd20fe3d088994cfdd18aca416d13497f698ea7b0cb321338318fc167e5fcd8ea4423d46c949304018ea6ebf3b04b712ac7cf25             1588 main/binary-amd64/Packages
+ dca6891d3cbf3a39be13ace6ec110133431fec5c2922d5bc43b01ec32748ed995e1a50bf6720b8ab2116eff480afbf7a58df3d784eb93045069605c43fa15b1b              750 main/binary-amd64/Packages.gz
