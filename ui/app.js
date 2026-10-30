@@ -304,7 +304,8 @@ function renderDetail() {
   $("empty-state").hidden = !!p;
   $("detail").hidden = !p;
   $("connect-btn").hidden = !p;
-  $("terminal-btn").hidden = !p;
+  $("terminal-more-wrap").hidden = !p;
+  if (!p) setTerminalMenu(false);
 
   if (!p) {
     $("title").textContent = "easySSH";
@@ -665,12 +666,39 @@ async function reloadSettings() {
 }
 
 function renderTerminalPicker() {
-  const sel = $("term-app");
-  sel.replaceChildren(
-    h("option", { value: "", text: "Automatic" }),
-    ...state.terminals.map((t) => h("option", { value: t.id, text: t.name })));
   // A choice that has since been uninstalled is opened as Automatic, so say so.
-  sel.value = state.terminals.some((t) => t.id === state.terminal) ? state.terminal : "";
+  const current = state.terminals.some((t) => t.id === state.terminal) ? state.terminal : "";
+  const item = (id, name) => h("button", {
+    class: "menu-item", role: "menuitemradio", "aria-checked": String(id === current),
+    onclick: () => chooseTerminal(id),
+  }, h("span", { class: "menu-check", "aria-hidden": "true",
+       html: '<svg viewBox="0 0 16 16"><path d="M3.5 8.5 6.5 11.5 12.5 4.5"/></svg>' }),
+     h("span", { class: "menu-text", text: name }));
+  $("terminal-menu-items").replaceChildren(
+    item("", "Automatic"),
+    ...state.terminals.map((t) => item(t.id, t.name)));
+}
+
+function setTerminalMenu(open, focusItem = false) {
+  $("terminal-menu").hidden = !open;
+  $("terminal-more").setAttribute("aria-expanded", String(open));
+  if (open && focusItem) $("terminal-menu").querySelector('[aria-checked="true"]')?.focus();
+}
+
+async function chooseTerminal(id) {
+  setTerminalMenu(false);
+  const previous = state.terminal;
+  state.terminal = id;
+  renderTerminalPicker();
+  try {
+    await invoke("set_terminal", { id: id || null });
+    const name = state.terminals.find((t) => t.id === id)?.name;
+    toast(name ? `Terminal opens in ${name}` : "easySSH picks the terminal");
+  } catch (err) {
+    state.terminal = previous;
+    renderTerminalPicker();
+    fail(err);
+  }
 }
 
 async function reloadConfigHosts() {
@@ -1807,17 +1835,25 @@ $("terminal-btn").addEventListener("click", async () => {
   } catch (e) { fail(e); }
 });
 
-$("term-app").addEventListener("change", async (e) => {
-  const id = e.target.value;
-  try {
-    await invoke("set_terminal", { id: id || null });
-    state.terminal = id;
-    const name = state.terminals.find((t) => t.id === id)?.name;
-    toast(name ? `Terminal opens in ${name}` : "easySSH picks the terminal");
-  } catch (err) {
-    fail(err);
-    renderTerminalPicker();   // the setting did not stick
-  }
+$("terminal-more").addEventListener("click", (e) => {
+  e.stopPropagation();
+  setTerminalMenu($("terminal-menu").hidden);
+});
+
+$("terminal-more").addEventListener("keydown", (e) => {
+  if (e.key === "ArrowDown") { e.preventDefault(); setTerminalMenu(true, true); }
+});
+
+document.addEventListener("click", (e) => {
+  if (!$("terminal-menu").hidden && !$("terminal-more-wrap").contains(e.target)) setTerminalMenu(false);
+});
+
+$("terminal-menu").addEventListener("keydown", (e) => {
+  const items = [...$("terminal-menu").querySelectorAll(".menu-item")];
+  const i = items.indexOf(document.activeElement);
+  if (e.key === "Escape") { e.preventDefault(); setTerminalMenu(false); $("terminal-more").focus(); }
+  else if (e.key === "ArrowDown") { e.preventDefault(); items[(i + 1) % items.length]?.focus(); }
+  else if (e.key === "ArrowUp") { e.preventDefault(); items[(i - 1 + items.length) % items.length]?.focus(); }
 });
 
 $("term-tunnels").addEventListener("change", () => {

@@ -444,6 +444,83 @@ body {
 }
 .btn-plain:hover { background: var(--bg-hover); }
 
+/* Terminal | ⋯ — one glass pill split by a hairline. */
+.split-btn {
+  position: relative;
+  display: inline-flex; align-items: stretch;
+  height: 26px;
+  background: var(--glass-strong);
+  border: 0.5px solid var(--border-strong);
+  border-radius: var(--radius);
+  box-shadow: var(--shadow-btn);
+}
+.split-btn[hidden] { display: none; }
+.split-btn > button {
+  display: inline-flex; align-items: center; justify-content: center; gap: 6px;
+  font: inherit; font-size: 12.5px; font-weight: 500;
+  color: var(--text);
+  background: transparent; border: 0; cursor: default;
+  transition: background 90ms var(--ease), color 90ms var(--ease);
+}
+.split-btn svg { width: 13px; height: 13px; fill: currentColor; }
+.split-main { padding: 0 11px 0 10px; border-radius: var(--radius) 0 0 var(--radius); }
+.split-more {
+  width: 26px; padding: 0; color: var(--text-2) !important;
+  border-radius: 0 var(--radius) var(--radius) 0;
+  border-left: 0.5px solid var(--border-strong) !important;
+}
+.split-btn > button:hover  { background: var(--bg-hover); }
+.split-btn > button:active { background: var(--bg-active); }
+.split-btn > button:focus-visible { outline: none; box-shadow: 0 0 0 3px var(--accent-ring); }
+.split-more[aria-expanded="true"] { background: var(--bg-active); color: var(--accent) !important; }
+
+.menu {
+  position: absolute; top: calc(100% + 6px); right: 0;
+  min-width: 220px;
+  padding: 5px;
+  background: color-mix(in srgb, var(--bg-card) 94%, transparent);
+  border-radius: var(--radius-lg);
+  box-shadow: var(--shadow-sheet);
+  z-index: 50;
+  transform-origin: top right;
+  animation: menu-in 140ms var(--ease);
+}
+@keyframes menu-in {
+  from { opacity: 0; transform: translateY(-4px) scale(0.97); }
+  to   { opacity: 1; transform: none; }
+}
+@media (prefers-reduced-motion: reduce) { .menu { animation: none; } }
+.menu-label {
+  padding: 6px 10px 5px;
+  font-size: 10.5px; font-weight: 600; letter-spacing: 0.06em; text-transform: uppercase;
+  color: var(--text-3);
+}
+.menu-item {
+  display: flex; align-items: center; gap: 8px; width: 100%;
+  height: 28px; padding: 0 10px 0 6px;
+  font: inherit; font-size: 13px; color: var(--text); text-align: left;
+  background: transparent; border: 0; border-radius: var(--radius-sm); cursor: default;
+}
+.menu-item:hover, .menu-item:focus-visible {
+  outline: none;
+  color: var(--text-on-accent);
+  background: var(--crab-sheen), var(--crab-gloss);
+}
+.menu-check { flex: none; width: 16px; height: 16px; display: grid; place-items: center; }
+.menu-check svg {
+  width: 13px; height: 13px; fill: none; stroke: var(--accent);
+  stroke-width: 2; stroke-linecap: round; stroke-linejoin: round;
+  visibility: hidden;
+}
+.menu-item[aria-checked="true"] .menu-check svg { visibility: visible; }
+.menu-item[aria-checked="true"] .menu-text { font-weight: 600; }
+.menu-item:hover .menu-check svg, .menu-item:focus-visible .menu-check svg { stroke: currentColor; }
+.menu-foot {
+  margin: 5px -5px -5px; padding: 7px 12px 8px;
+  font-size: 11px; color: var(--text-3);
+  border-top: 0.5px solid var(--divider);
+}
+
 .btn-small { height: 23px; padding: 0 10px; font-size: 12px; }
 .btn-large { height: 32px; padding: 0 18px; font-size: 13.5px; }
 
@@ -618,10 +695,6 @@ input, select, textarea { user-select: text; }
 .checkbox { display: flex; align-items: center; gap: 7px; font-size: 12.5px; color: var(--text-2); margin-top: 10px; }
 .checkbox input { accent-color: var(--accent); width: 13px; height: 13px; }
 .location-toggle { margin-top: 8px; }
-
-/* The terminal picker: one app-wide choice, sat above the command it will run. */
-.term-app-row { display: flex; align-items: center; gap: 8px; margin-bottom: 10px; font-size: 12.5px; color: var(--text-2); }
-.term-app-row select { flex: 0 1 240px; }
 
 /* callout */
 
