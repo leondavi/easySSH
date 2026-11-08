@@ -303,8 +303,8 @@ fn collect(
                     continue; // a directive before any Host is a global default we ignore
                 };
                 match key.as_str() {
-                    "hostname" => block.hostname = Some(value.to_string()),
-                    "user" => block.user = Some(value.to_string()),
+                    "hostname" => block.hostname = Some(unquote(value)),
+                    "user" => block.user = Some(unquote(value)),
                     "port" => block.port = value.parse().ok(),
                     // Only the first IdentityFile is offered in the UI; ssh would try all.
                     "identityfile" if block.identity_file.is_none() => {
@@ -337,6 +337,18 @@ fn split_directive(line: &str) -> Option<(&str, &str)> {
 
 fn unquote(s: &str) -> String {
     s.trim_matches('"').to_string()
+}
+
+/// A directive value as ssh config must see it: ssh splits on whitespace and
+/// treats extra words as a fatal error for the whole file (and every file that
+/// includes it), so a value holding a space — `C:\Users\John Doe\.ssh\key`,
+/// a Windows user name — has to be quoted.
+pub fn quote_value(s: &str) -> String {
+    if s.contains(char::is_whitespace) {
+        format!("\"{s}\"")
+    } else {
+        s.to_string()
+    }
 }
 
 /// Expand `~` and, on Windows, `%USERPROFILE%`-style paths.
@@ -517,14 +529,14 @@ pub fn append_host(
 
     let mut block = String::new();
     block.push_str(&format!("\n# Added by easySSH\nHost {alias}\n"));
-    block.push_str(&format!("    HostName {}\n", profile.host));
-    block.push_str(&format!("    User {}\n", profile.username));
+    block.push_str(&format!("    HostName {}\n", quote_value(&profile.host)));
+    block.push_str(&format!("    User {}\n", quote_value(&profile.username)));
     if profile.port != 22 {
         block.push_str(&format!("    Port {}\n", profile.port));
     }
     if profile.auth == crate::model::AuthMethod::Key {
         if let Some(key) = &profile.key_path {
-            block.push_str(&format!("    IdentityFile {key}\n"));
+            block.push_str(&format!("    IdentityFile {}\n", quote_value(key)));
             // Without this ssh offers every agent key first and may hit MaxAuthTries.
             block.push_str("    IdentitiesOnly yes\n");
         }

@@ -90,6 +90,14 @@ pub async fn start_counting(
         loop {
             let (socket, peer) = match listener.accept().await {
                 Ok(v) => v,
+                // Out of file descriptors (a GUI app on macOS gets 256 by
+                // default, and a browser opens many), or a client that gave
+                // up mid-handshake: both pass. Ending the loop over them would
+                // take the tunnel down until the next health sweep.
+                Err(e) if is_transient_accept_error(&e) => {
+                    tokio::time::sleep(std::time::Duration::from_millis(100)).await;
+                    continue;
+                }
                 Err(e) => {
                     on_error(format!("stopped accepting connections: {e}"));
                     return;
@@ -159,6 +167,25 @@ async fn forward(
     let mut stream = channel.into_stream();
     tokio::io::copy_bidirectional(&mut socket, &mut stream).await?;
     Ok(())
+}
+
+/// Accept errors that say nothing about the listener itself.
+fn is_transient_accept_error(e: &std::io::Error) -> bool {
+    use std::io::ErrorKind::*;
+    if matches!(
+        e.kind(),
+        ConnectionAborted | ConnectionReset | Interrupted | WouldBlock
+    ) {
+        return true;
+    }
+    // ENOMEM, ENFILE, EMFILE (too many open files), ENOBUFS — the last
+    // differs by platform.
+    const ENOBUFS: i32 = if cfg!(target_os = "linux") { 105 } else { 55 };
+    match e.raw_os_error() {
+        Some(code) if cfg!(unix) => matches!(code, 12 | 23 | 24) || code == ENOBUFS,
+        Some(code) if cfg!(windows) => matches!(code, 10024 | 10055), // WSAEMFILE, WSAENOBUFS
+        _ => false,
+    }
 }
 
 #[cfg(test)]

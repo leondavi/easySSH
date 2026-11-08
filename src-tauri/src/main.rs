@@ -313,11 +313,12 @@ fn load_connections(settings: &model::Settings) -> Vec<Profile> {
                 profiles.push(old);
             }
         }
-        if let Err(e) = ezconfig::save(&dir, &profiles) {
-            eprintln!(
-                "easySSH: could not write {}: {e}",
+        match ezconfig::save(&dir, &profiles) {
+            Ok(()) => store::remove_legacy_profiles(),
+            Err(e) => eprintln!(
+                "easySSH: could not write {}: {e} — profiles.json is kept for the next start",
                 ezconfig::path_for(&dir).display()
-            );
+            ),
         }
     }
     profiles

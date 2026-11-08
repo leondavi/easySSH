@@ -18,6 +18,7 @@ use std::path::{Path, PathBuf};
 use serde::{Deserialize, Serialize};
 
 use crate::model::{AuthMethod, Profile, Tunnel};
+use crate::sshconfig::quote_value;
 
 /// The managed config file's name. Also used to keep it out of the host list
 /// parsed from the user's own config, which `Include`s it.
@@ -62,11 +63,24 @@ struct Meta {
 }
 
 fn load_meta(dir: &Path) -> Vec<Meta> {
-    let Ok(raw) = fs::read_to_string(meta_path_for(dir)) else {
+    let path = meta_path_for(dir);
+    let Ok(raw) = fs::read(&path) else {
         return Vec::new();
     };
-    serde_json::from_str(&raw).unwrap_or_else(|e| {
-        log::warn!("ez_config.json is not readable ({e}); falling back to the config file alone");
+    serde_json::from_slice(&raw).unwrap_or_else(|e| {
+        // The next save rewrites this file from what was understood, which
+        // would make the loss of names, tunnels and colours permanent. Keep
+        // the original beside it so it can still be recovered by hand.
+        let backup = PathBuf::from(format!("{}.bak", path.display()));
+        let kept = fs::copy(&path, &backup).is_ok();
+        log::warn!(
+            "ez_config.json is not readable ({e}); falling back to the config file alone{}",
+            if kept {
+                format!(" — the original is kept as {}", backup.display())
+            } else {
+                String::new()
+            }
+        );
         Vec::new()
     })
 }
@@ -88,9 +102,12 @@ struct Entry {
 /// general one in `sshconfig`: this file is ours, and we need the
 /// `LocalForward` lines that the profile list does not otherwise care about.
 fn parse(path: &Path) -> Vec<Entry> {
-    let Ok(text) = fs::read_to_string(path) else {
+    // Lossy rather than strict: one non-UTF-8 byte from a hand edit must not
+    // read as "no connections", which the next save would then make true.
+    let Ok(bytes) = fs::read(path) else {
         return Vec::new();
     };
+    let text = String::from_utf8_lossy(&bytes);
     let mut out: Vec<Entry> = Vec::new();
 
     for raw in text.lines() {
@@ -124,8 +141,8 @@ fn parse(path: &Path) -> Vec<Entry> {
             continue;
         };
         match key.as_str() {
-            "hostname" => entry.hostname = Some(value.to_string()),
-            "user" => entry.user = Some(value.to_string()),
+            "hostname" => entry.hostname = Some(value.trim_matches('"').to_string()),
+            "user" => entry.user = Some(value.trim_matches('"').to_string()),
             "port" => entry.port = value.parse().ok(),
             "identityfile" if entry.identity_file.is_none() => {
                 entry.identity_file = Some(value.trim_matches('"').to_string());
@@ -309,14 +326,14 @@ pub fn save(dir: &Path, profiles: &[Profile]) -> io::Result<()> {
         let alias = unique_alias(p, &mut used);
 
         body.push_str(&format!("\nHost {alias}\n"));
-        body.push_str(&format!("    HostName {}\n", p.host));
-        body.push_str(&format!("    User {}\n", p.username));
+        body.push_str(&format!("    HostName {}\n", quote_value(&p.host)));
+        body.push_str(&format!("    User {}\n", quote_value(&p.username)));
         if p.port != 22 {
             body.push_str(&format!("    Port {}\n", p.port));
         }
         if p.auth == AuthMethod::Key {
             if let Some(key) = &p.key_path {
-                body.push_str(&format!("    IdentityFile {key}\n"));
+                body.push_str(&format!("    IdentityFile {}\n", quote_value(key)));
                 // Without this ssh offers every agent key first and can hit
                 // MaxAuthTries before it ever gets to this one.
                 body.push_str("    IdentitiesOnly yes\n");
@@ -367,7 +384,7 @@ pub fn save(dir: &Path, profiles: &[Profile]) -> io::Result<()> {
 
 /// Write-then-rename so a crash mid-write cannot truncate what is there, and
 /// keep the result 0600 like the rest of `~/.ssh`.
-fn write_private(path: &Path, body: &str) -> io::Result<()> {
+fn write_private(path: &Path, body: impl AsRef<[u8]>) -> io::Result<()> {
     let tmp = PathBuf::from(format!("{}.tmp", path.display()));
     fs::write(&tmp, body)?;
     #[cfg(unix)]
@@ -385,7 +402,26 @@ fn write_private(path: &Path, body: &str) -> io::Result<()> {
 /// directive, so an easySSH connection must be able to state its own.
 pub fn ensure_include(dir: &Path) -> io::Result<()> {
     let path = crate::sshconfig::config_path_for(dir);
-    let existing = fs::read_to_string(&path).unwrap_or_default();
+    // Write through a symlinked config (stow, chezmoi…) rather than replacing
+    // the link with a plain file.
+    let path = fs::canonicalize(&path).unwrap_or(path);
+    // Only a missing file counts as empty. A config that exists but cannot be
+    // read must never be "rewritten" as just the Include line — that would
+    // throw the user's own hosts away.
+    let raw = match fs::read(&path) {
+        Ok(raw) => raw,
+        Err(e) if e.kind() == io::ErrorKind::NotFound => Vec::new(),
+        Err(e) => {
+            return Err(io::Error::new(
+                e.kind(),
+                format!(
+                    "could not read {} to add the easySSH Include line: {e}",
+                    path.display()
+                ),
+            ))
+        }
+    };
+    let existing = String::from_utf8_lossy(&raw);
 
     let present = existing.lines().any(|line| {
         let line = line.trim();
@@ -400,10 +436,14 @@ pub fn ensure_include(dir: &Path) -> io::Result<()> {
         return Ok(());
     }
 
-    let body = format!(
+    // Prepend to the original bytes, not the lossy text: whatever encoding
+    // the rest of the file is in stays exactly as it was.
+    let mut body = format!(
         "# easySSH keeps its own connections in {FILE_NAME}, beside this file.\n\
-         Include {FILE_NAME}\n\n{existing}"
-    );
+         Include {FILE_NAME}\n\n"
+    )
+    .into_bytes();
+    body.extend_from_slice(&raw);
     write_private(&path, &body)
 }
 
@@ -429,10 +469,8 @@ fn unique_alias(profile: &Profile, used: &mut HashSet<String>) -> String {
         .collect();
     base = base.trim_matches('-').to_string();
     if base.is_empty() {
-        base = format!(
-            "ez-{}",
-            &profile.id.replace('-', "")[..8.min(profile.id.len())]
-        );
+        let id: String = profile.id.chars().filter(|c| *c != '-').take(8).collect();
+        base = format!("ez-{id}");
     }
 
     let mut alias = base.clone();
@@ -485,6 +523,85 @@ mod tests {
         let _ = fs::remove_dir_all(&dir);
         fs::create_dir_all(&dir).unwrap();
         dir
+    }
+
+    /// A Windows user name and key path with spaces must be quoted, or ssh
+    /// rejects ez_config — and with it the user's whole config.
+    #[test]
+    fn values_with_spaces_are_quoted_and_read_back() {
+        let dir = tmpdir("spaces");
+        let mut p = profile("work", "10.0.0.5");
+        p.username = "John Doe".into();
+        p.key_path = Some(r"C:\Users\John Doe\.ssh\id_ed25519".into());
+        save(&dir, std::slice::from_ref(&p)).unwrap();
+
+        let text = fs::read_to_string(path_for(&dir)).unwrap();
+        assert!(text.contains("User \"John Doe\""), "{text}");
+        assert!(
+            text.contains(r#"IdentityFile "C:\Users\John Doe\.ssh\id_ed25519""#),
+            "{text}"
+        );
+
+        let back = load(&dir);
+        assert_eq!(back[0].username, "John Doe");
+        assert_eq!(back[0].key_path, p.key_path);
+    }
+
+    /// The Include line is prepended to the user's config byte for byte —
+    /// never by replacing a file that did not read as UTF-8.
+    #[test]
+    fn the_include_line_keeps_a_non_utf8_config_intact() {
+        let dir = tmpdir("latin1");
+        let config = crate::sshconfig::config_path_for(&dir);
+        let original: &[u8] = b"# caf\xe9\nHost box\n    HostName 10.0.0.9\n";
+        fs::write(&config, original).unwrap();
+
+        ensure_include(&dir).unwrap();
+
+        let after = fs::read(&config).unwrap();
+        assert!(
+            after.ends_with(original),
+            "the user's config was not preserved"
+        );
+        assert!(String::from_utf8_lossy(&after).contains("Include ez_config"));
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn the_include_line_is_written_through_a_symlinked_config() {
+        let dir = tmpdir("symlink");
+        let real = dir.join("dotfiles-config");
+        fs::write(&real, "Host box\n").unwrap();
+        let config = crate::sshconfig::config_path_for(&dir);
+        std::os::unix::fs::symlink(&real, &config).unwrap();
+
+        ensure_include(&dir).unwrap();
+
+        assert!(fs::symlink_metadata(&config)
+            .unwrap()
+            .file_type()
+            .is_symlink());
+        assert!(fs::read_to_string(&real)
+            .unwrap()
+            .contains("Include ez_config"));
+    }
+
+    #[test]
+    fn an_unreadable_sidecar_is_kept_as_a_backup() {
+        let dir = tmpdir("badmeta");
+        fs::write(meta_path_for(&dir), "{ not json").unwrap();
+        assert!(load_meta(&dir).is_empty());
+        let backup = PathBuf::from(format!("{}.bak", meta_path_for(&dir).display()));
+        assert_eq!(fs::read_to_string(backup).unwrap(), "{ not json");
+    }
+
+    #[test]
+    fn a_short_dashed_id_does_not_panic_the_alias() {
+        let mut p = profile("שרת", "10.0.0.1");
+        p.config_alias = None;
+        p.id = "a-b-c".into();
+        let alias = unique_alias(&p, &mut HashSet::new());
+        assert_eq!(alias, "ez-abc");
     }
 
     #[test]

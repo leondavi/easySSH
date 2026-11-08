@@ -194,7 +194,7 @@ struct Finished {
 }
 
 /// Drain a channel until it closes, collecting stderr and the exit status.
-async fn finish(channel: &mut russh::Channel<russh::client::Msg>) -> Finished {
+async fn finish(channel: &mut russh::ChannelReadHalf) -> Finished {
     let mut stderr = Vec::new();
     let mut code = None;
     while let Some(msg) = channel.wait().await {
@@ -257,37 +257,53 @@ pub async fn send(
     // reports where `~` and relative paths actually led.
     let script = format!("set -e; d={dir}; mkdir -p -- \"$d\"; cd -- \"$d\"; tar xzf -; pwd >&2");
 
-    let mut channel = handle
+    let channel = handle
         .channel_open_session()
         .await
         .context("could not open a channel for the transfer")?;
     channel.exec(true, script).await?;
 
-    let mut file = tokio::fs::File::open(&archive.0).await?;
-    let mut buf = vec![0u8; CHUNK];
-    let mut sent = 0u64;
-    let mut stream_err = None;
-    loop {
-        let n = file.read(&mut buf).await?;
-        if n == 0 {
-            break;
+    // Read the channel *while* writing to it. russh queues everything the
+    // server sends (stderr, window adjustments) in a bounded buffer; left
+    // undrained during a long upload it fills, and the next line of stderr
+    // from tar then stalls the whole session — window updates included, so
+    // the upload never finishes and every tunnel on it freezes too.
+    let (mut reader, writer) = channel.split();
+    let file = tokio::fs::File::open(&archive.0).await?;
+    let write = async {
+        let mut file = file;
+        let mut buf = vec![0u8; CHUNK];
+        let mut sent = 0u64;
+        let mut stream_err = None;
+        loop {
+            let n = match file.read(&mut buf).await {
+                Ok(n) => n,
+                Err(e) => {
+                    stream_err = Some(anyhow::Error::from(e));
+                    break;
+                }
+            };
+            if n == 0 {
+                break;
+            }
+            if let Err(e) = writer.data(&buf[..n]).await {
+                // The server stopped reading — usually because the script
+                // failed. Its own message says why, so collect that rather
+                // than report a bare "channel closed".
+                stream_err = Some(e.into());
+                break;
+            }
+            sent += n as u64;
+            progress(Progress {
+                phase: "sending",
+                done: sent,
+                total: Some(size),
+            });
         }
-        if let Err(e) = channel.data(&buf[..n]).await {
-            // The server stopped reading — usually because the script failed.
-            // Its own message says why, so collect that rather than report a
-            // bare "channel closed".
-            stream_err = Some(e);
-            break;
-        }
-        sent += n as u64;
-        progress(Progress {
-            phase: "sending",
-            done: sent,
-            total: Some(size),
-        });
-    }
-    let _ = channel.eof().await;
-    let done = finish(&mut channel).await;
+        let _ = writer.eof().await;
+        (sent, stream_err)
+    };
+    let ((sent, stream_err), done) = tokio::join!(write, finish(&mut reader));
 
     if done.code != Some(0) || stream_err.is_some() {
         return Err(remote_failure(&format!("could not send {name}"), &done));

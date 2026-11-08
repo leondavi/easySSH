@@ -22,7 +22,7 @@ fn profiles_path() -> io::Result<PathBuf> {
 }
 
 /// Read the connections saved by versions that kept them in the application
-/// data directory, and remove that file.
+/// data directory. The caller removes the file once they are saved elsewhere.
 ///
 /// Connections now live in `ez_config` inside the `.ssh` directory, next to
 /// the keys and the config they belong with. Returning `None` once the file is
@@ -37,8 +37,15 @@ pub fn take_legacy_profiles() -> Option<Vec<Profile>> {
     if profiles.is_empty() && !raw.trim().is_empty() && raw.trim() != "[]" {
         return None; // unreadable: keep it rather than throw the user's list away
     }
-    let _ = fs::remove_file(&path);
     Some(profiles)
+}
+
+/// Remove the old `profiles.json` — only once its connections are safely
+/// written to `ez_config`, so a failed save leaves the migration to retry.
+pub fn remove_legacy_profiles() {
+    if let Ok(path) = profiles_path() {
+        let _ = fs::remove_file(path);
+    }
 }
 
 /// Seconds since the Unix epoch.

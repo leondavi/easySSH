@@ -176,26 +176,63 @@ const fail = (e) => toast(typeof e === "string" ? e : e?.message ?? String(e), "
 /* ── sheets ───────────────────────────────────────────────────────────── */
 
 let closeSheet = null;
+let currentSheet = null;      // { onKey, nodes, className } of the visible sheet
+const sheetStack = [];        // sheets covered by a stacked one, innermost last
 
-function sheet(build) {
+/** Open a sheet. By default it replaces whatever sheet is showing; with
+ *  `stack` it covers it instead, and closing it brings the covered sheet back
+ *  exactly as it was (typed input included). */
+function sheet(build, { stack = false } = {}) {
   const backdrop = $("sheet-backdrop");
   const host = $("sheet");
-  host.replaceChildren();
 
+  if (currentSheet) {
+    document.removeEventListener("keydown", currentSheet.onKey);
+    if (stack) {
+      currentSheet.nodes = [...host.childNodes];
+      currentSheet.className = host.className;
+      sheetStack.push(currentSheet);
+    } else {
+      // Replaced, not covered: it and anything under it are gone for good,
+      // so their close() must not tear down the sheet that took their place.
+      currentSheet.open = false;
+      for (const s of sheetStack) s.open = false;
+      sheetStack.length = 0;
+    }
+  }
+  host.replaceChildren();
+  host.className = "sheet";
+
+  const me = { open: true };
   const close = () => {
-    backdrop.hidden = true;
-    host.replaceChildren();
-    document.removeEventListener("keydown", onKey);
-    closeSheet = null;
+    if (!me.open || currentSheet !== me) return;
+    me.open = false;
+    document.removeEventListener("keydown", me.onKey);
+    const parent = sheetStack.pop();
+    if (parent) {
+      host.replaceChildren(...parent.nodes);
+      host.className = parent.className;
+      document.addEventListener("keydown", parent.onKey);
+      currentSheet = parent;
+      closeSheet = parent.close;
+    } else {
+      backdrop.hidden = true;
+      host.replaceChildren();
+      host.className = "sheet";
+      currentSheet = null;
+      closeSheet = null;
+    }
   };
-  const onKey = (e) => {
+  me.close = close;
+  me.onKey = (e) => {
     if (e.key === "Escape") { e.preventDefault(); close(); }
   };
+  currentSheet = me;
+  closeSheet = close;
 
   build(host, close);
   backdrop.hidden = false;
-  document.addEventListener("keydown", onKey);
-  closeSheet = close;
+  document.addEventListener("keydown", me.onKey);
 
   const first = host.querySelector("input, select, button.btn-primary");
   if (first) setTimeout(() => first.focus(), 30);
@@ -490,6 +527,9 @@ async function chooseKeyFile() {
 
 function renderKeyPicker(p) {
   const sel = $("key-select");
+  // Rebuilding the options closes an open dropdown under the user's cursor.
+  if (document.activeElement === sel && sel.dataset.profile === p.id) return;
+  sel.dataset.profile = p.id;
   const options = [...state.keys];
 
   // A key chosen from outside ~/.ssh still needs to appear in the list.
@@ -619,7 +659,9 @@ function select(id) {
 }
 
 async function reloadProfiles() {
-  state.profiles = await invoke("list_profiles");
+  try {
+    state.profiles = await invoke("list_profiles");
+  } catch (e) { fail(e); return; }
   if (state.selectedId && !state.profiles.some((p) => p.id === state.selectedId)) {
     state.selectedId = state.profiles[0]?.id ?? null;
   }
@@ -775,7 +817,13 @@ async function reloadProbes() {
 
 async function reloadStatuses() {
   try {
-    for (const s of await invoke("session_statuses")) state.statuses.set(s.profile_id, s);
+    const list = await invoke("session_statuses");
+    // Polled every 2.5s while connected: rebuilding the detail pane when
+    // nothing moved only costs work and steals focus from its controls.
+    const same = list.every((s) =>
+      JSON.stringify(state.statuses.get(s.profile_id)) === JSON.stringify(s));
+    if (same) return;
+    for (const s of list) state.statuses.set(s.profile_id, s);
     renderSidebar();
     renderDetail();
   } catch { /* transient */ }
@@ -929,7 +977,7 @@ function setupSheet(p) {
         await reloadKeys();
         rebuildKeys();
         keySel.value = info.path;
-      }) });
+      }, { stack: true }) });
 
     const err = h("div", { class: "sheet-error", hidden: true });
     const note = h("div", { class: "sheet-note", hidden: true });
@@ -1007,7 +1055,7 @@ async function showPublicKeySheet(path) {
 
 /* key generation */
 
-function generateKeySheet(onCreated) {
+function generateKeySheet(onCreated, opts) {
   sheet((host, close) => {
     const name = h("input", { type: "text", value: suggestKeyName(), spellcheck: "false" });
     const algo = h("select", {},
@@ -1043,7 +1091,7 @@ function generateKeySheet(onCreated) {
       err,
       h("div", { class: "sheet-actions" },
         h("button", { class: "btn", text: "Cancel", onclick: close }), go));
-  });
+  }, opts);
 }
 
 function suggestKeyName() {
@@ -1086,10 +1134,15 @@ async function applyTunnelToLiveSession(profileId, t, wasRunning) {
   await reloadStatuses();
 }
 
+const tunnelsBusy = new Set();
+
 async function toggleTunnel(p, t, running) {
+  const key = `${p.id}/${t.id}`;
+  if (tunnelsBusy.has(key)) return;   // double click: one request at a time
+  tunnelsBusy.add(key);
   try {
     await invoke(running ? "stop_tunnel" : "start_tunnel", { profileId: p.id, tunnelId: t.id });
-  } catch (e) { fail(e); }
+  } catch (e) { fail(e); } finally { tunnelsBusy.delete(key); }
   await reloadStatuses();
 }
 
@@ -1360,7 +1413,7 @@ function profileSheet(existing) {
           onclick: () => generateKeySheet(async (info) => {
             await reloadKeys();
             useKey(info);
-          }) })));
+          }, { stack: true }) })));
 
     const syncAuth = () => {
       keyRow.hidden = authSel.value !== "key";
@@ -1482,7 +1535,9 @@ function hostKeySheet(p, change, retry) {
       toast(`Trusted the new host key for ${p.name}` +
             (removed ? ` — replaced ${removed} old entr${removed === 1 ? "y" : "ies"} ` +
                        `(backup in known_hosts.easyssh-backup)` : ""), "success", 9000);
-      if (retry) await retry();
+      // The sheet (and its error box) is gone now, so a failed retry has to
+      // be reported as a toast or the user sees nothing at all.
+      if (retry) retry().catch(fail);
     });
 
     const previous = change.previous.length
@@ -1708,6 +1763,7 @@ async function runQuickCommand() {
 
   const out = $("run-output");
   const btn = $("run-btn");
+  if (btn.disabled) return;   // Enter while a command is still running
   btn.disabled = true;
   out.hidden = false;
   out.className = "run-output mono";
@@ -1715,6 +1771,7 @@ async function runQuickCommand() {
 
   try {
     const r = await invoke("run_command", { profileId: p.id, command });
+    if (state.selectedId !== p.id) return;   // user moved on; not this pane's output
     const parts = [];
     if (r.stdout.trim()) parts.push(r.stdout.replace(/\s+$/, ""));
     if (r.stderr.trim()) parts.push(r.stderr.replace(/\s+$/, ""));
@@ -2033,11 +2090,14 @@ function remoteBrowser(p, { mode, start, title, onChoose }) {
 
     const join = (dir, name) => (dir.endsWith("/") ? dir + name : `${dir}/${name}`);
 
+    let goSeq = 0;
     async function go(dir) {
+      const seq = ++goSeq;
       err.hidden = true;
       list.replaceChildren(h("div", { class: "remote-empty" }, h("span", { class: "spinner" })));
       try {
         const listing = await invoke("list_remote_dir", { profileId: p.id, dir });
+        if (seq !== goSeq) return;   // a newer folder was clicked meanwhile
         current = listing.path;
         entries = listing.entries;
         picked = null;

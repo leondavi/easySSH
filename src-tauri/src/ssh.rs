@@ -505,6 +505,20 @@ pub async fn connect_profile_with(
 
 /// Run one command on the remote and collect its output.
 pub async fn exec(handle: &Handle<Client>, command: &str) -> Result<Output> {
+    exec_limited(handle, command, usize::MAX, None).await
+}
+
+/// Like [`exec`], for commands typed by the user: output beyond `max_bytes`
+/// is dropped and the command is hung up on after `timeout`, so `tail -f`,
+/// `yes` or a huge `cat` cannot hold a channel open forever or eat the app's
+/// memory. What arrived until then is still returned, with a note saying why
+/// it stops.
+pub async fn exec_limited(
+    handle: &Handle<Client>,
+    command: &str,
+    max_bytes: usize,
+    timeout: Option<std::time::Duration>,
+) -> Result<Output> {
     let mut channel = handle.channel_open_session().await?;
     channel.exec(true, command).await?;
     // Nothing will be written to the command's stdin, so say so. A command
@@ -514,8 +528,25 @@ pub async fn exec(handle: &Handle<Client>, command: &str) -> Result<Output> {
     let mut stdout = Vec::new();
     let mut stderr = Vec::new();
     let mut code = None;
+    let mut signal = None;
+    let mut cut_short = None;
 
-    while let Some(msg) = channel.wait().await {
+    let deadline = timeout.map(|t| tokio::time::Instant::now() + t);
+    loop {
+        let msg = match deadline {
+            Some(d) => match tokio::time::timeout_at(d, channel.wait()).await {
+                Ok(msg) => msg,
+                Err(_) => {
+                    cut_short = Some(format!(
+                        "[stopped after {}s — easySSH does not wait longer for a command]",
+                        timeout.unwrap_or_default().as_secs()
+                    ));
+                    break;
+                }
+            },
+            None => channel.wait().await,
+        };
+        let Some(msg) = msg else { break };
         match msg {
             ChannelMsg::Data { ref data } => stdout.extend_from_slice(data),
             ChannelMsg::ExtendedData { ref data, ext } => {
@@ -525,14 +556,55 @@ pub async fn exec(handle: &Handle<Client>, command: &str) -> Result<Output> {
                 }
             }
             ChannelMsg::ExitStatus { exit_status } => code = Some(exit_status),
+            ChannelMsg::ExitSignal { signal_name, .. } => signal = Some(signal_name),
             _ => {}
         }
+        if stdout.len() + stderr.len() > max_bytes {
+            cut_short = Some(format!(
+                "[output cut off after {} MiB]",
+                max_bytes / (1024 * 1024)
+            ));
+            break;
+        }
+    }
+    if cut_short.is_some() {
+        // Hang up without waiting on it: a stuck peer is the reason we are
+        // here, and the result is ready now.
+        tokio::spawn(async move {
+            let _ = channel.close().await;
+        });
     }
 
+    let mut stderr = String::from_utf8_lossy(&stderr).into_owned();
+    let mut note = |line: String| {
+        if !stderr.is_empty() && !stderr.ends_with('\n') {
+            stderr.push('\n');
+        }
+        stderr.push_str(&line);
+    };
+    // No exit status means the command did not finish normally. Reporting 0
+    // would pass off partial output — a cut-off directory listing, say — as
+    // complete and successful.
+    let code = match (code, signal, cut_short) {
+        (_, _, Some(why)) => {
+            note(why);
+            code.unwrap_or(255)
+        }
+        (Some(c), _, None) => c,
+        (None, Some(sig), None) => {
+            note(format!("[killed by signal {sig:?}]"));
+            255
+        }
+        (None, None, None) => {
+            note("[the connection closed before the command reported an exit status]".into());
+            255
+        }
+    };
+
     Ok(Output {
-        code: code.unwrap_or(0),
+        code,
         stdout: String::from_utf8_lossy(&stdout).into_owned(),
-        stderr: String::from_utf8_lossy(&stderr).into_owned(),
+        stderr,
     })
 }
 
@@ -731,6 +803,68 @@ pub async fn disconnect(handle: &Handle<Client>) {
 mod tests {
     use super::*;
     use crate::testserver as harness;
+
+    #[cfg(unix)]
+    async fn shell_session(tag: &str) -> Session {
+        let home = std::env::temp_dir().join(format!("easyssh-limit-{tag}-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&home);
+        std::fs::create_dir_all(&home).unwrap();
+        // The test server runs commands synchronously inside its handler; on
+        // its own runtime and thread, a long command there cannot stall the
+        // client's timers here.
+        let (tx, rx) = std::sync::mpsc::channel();
+        std::thread::spawn(move || {
+            let rt = tokio::runtime::Builder::new_multi_thread()
+                .worker_threads(1)
+                .enable_all()
+                .build()
+                .unwrap();
+            rt.block_on(async move {
+                tx.send(harness::start_with_shell(home).await).unwrap();
+                std::future::pending::<()>().await;
+            });
+        });
+        let port = rx.recv().unwrap();
+        let kh = harness::known_hosts(&format!("limit-{tag}"));
+        connect_password("127.0.0.1", port, "someone", harness::PASSWORD, &kh)
+            .await
+            .expect("connect")
+    }
+
+    /// Output past the cap is dropped and the channel hung up on. (The test
+    /// server only replies once a command exits, so this uses a finite flood
+    /// rather than `yes`.)
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn a_flood_of_output_is_cut_off_at_the_cap() {
+        let session = shell_session("cap").await;
+        let flood = "head -c 6000000 /dev/zero | tr '\\0' y";
+        let out = exec_limited(&session.handle, flood, 1024 * 1024, None)
+            .await
+            .expect("exec");
+        assert!(out.stdout.len() >= 1024 * 1024, "{}", out.stdout.len());
+        assert!(out.stdout.len() < 6_000_000, "{}", out.stdout.len());
+        assert!(out.stderr.contains("cut off"), "{}", out.stderr);
+        assert_ne!(out.code, 0);
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn a_command_that_runs_too_long_is_hung_up_on() {
+        let session = shell_session("timeout").await;
+        let started = std::time::Instant::now();
+        let out = exec_limited(
+            &session.handle,
+            "sleep 6",
+            usize::MAX,
+            Some(std::time::Duration::from_secs(1)),
+        )
+        .await
+        .expect("exec");
+        assert!(started.elapsed() < std::time::Duration::from_secs(4));
+        assert!(out.stderr.contains("stopped after 1s"), "{}", out.stderr);
+        assert_ne!(out.code, 0);
+    }
 
     #[tokio::test]
     async fn exec_collects_stdout_stderr_and_exit_status() {

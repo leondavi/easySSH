@@ -83,11 +83,33 @@ pub async fn save_profile(
     state: State<'_, AppState>,
     mut profile: Profile,
 ) -> Result<Profile, String> {
-    if profile.host.trim().is_empty() {
+    profile.host = profile.host.trim().to_string();
+    profile.username = profile.username.trim().to_string();
+    if profile.host.is_empty() {
         return Err("a host name or IP address is required".into());
     }
-    if profile.username.trim().is_empty() {
+    if profile.username.is_empty() {
         return Err("a user name is required".into());
+    }
+    // Both are written into ez_config, which the user's ssh config includes:
+    // a stray quote or line break would make ssh reject the file — for every
+    // host on the machine, not just this one.
+    if profile
+        .host
+        .contains(|c: char| c.is_whitespace() || c.is_control() || "\"'#".contains(c))
+    {
+        return Err("the host cannot contain spaces, quotes or '#'".into());
+    }
+    if profile
+        .username
+        .contains(|c: char| c.is_control() || c == '"')
+    {
+        return Err("the user name cannot contain quotes or line breaks".into());
+    }
+    if let Some(key) = &profile.key_path {
+        if key.contains(|c: char| c.is_control() || c == '"') {
+            return Err("the key path cannot contain quotes or line breaks".into());
+        }
     }
     if profile.auth == AuthMethod::Key && profile.key_path.as_deref().unwrap_or("").is_empty() {
         return Err("choose a private key, or switch this connection to password".into());
@@ -324,17 +346,24 @@ pub async fn connect(
     }
 
     let mut inner = state.inner.lock().await;
-    if inner.sessions.contains_key(&profile_id) {
+    let gone = inner.profile(&profile_id).is_none();
+    if inner.sessions.contains_key(&profile_id) || gone {
         // Another connect for this profile finished while this one was in its
-        // handshake. Keep that one and hang this one up: overwriting it would
-        // drop its forwards without stopping them — `RunningTunnel` does not
-        // stop on drop — leaving their local ports held for good.
+        // handshake — or the connection was deleted meanwhile, and a session
+        // for it would be listed nowhere and hold its ports until quit. Hang
+        // this one up: overwriting a live session would drop its forwards
+        // without stopping them — `RunningTunnel` does not stop on drop —
+        // leaving their local ports held for good.
         drop(inner);
         for (_, t) in live.tunnels {
             t.stop();
         }
         ssh::disconnect(&live.session.handle).await;
-        return Err("that connection is already open".into());
+        return Err(if gone {
+            "that connection was deleted while connecting".into()
+        } else {
+            "that connection is already open".into()
+        });
     }
     // Deliberately not adopted: connecting to a host defined in the ssh config
     // must not copy it into profiles.json, or deleting its `Host` block later
@@ -793,7 +822,15 @@ pub async fn open_terminal(
             tidy_key(&app, path);
         }
     }
-    terminal::open(&profile, include_tunnels, &forwarded, preferred.as_deref()).map_err(anyhow_err)
+    // Opening a terminal can wait on AppleScript (a cold app launch, or the
+    // first-use Automation prompt) or on a child process starting: blocking
+    // work that must not sit on an async runtime worker.
+    tauri::async_runtime::spawn_blocking(move || {
+        terminal::open(&profile, include_tunnels, &forwarded, preferred.as_deref())
+    })
+    .await
+    .map_err(|e| e.to_string())?
+    .map_err(anyhow_err)
 }
 
 /// The terminal apps installed here that the Terminal button can open.
@@ -810,7 +847,10 @@ pub async fn list_terminals() -> Result<Vec<TerminalApp>, String> {
 pub async fn set_terminal(state: State<'_, AppState>, id: Option<String>) -> Result<(), String> {
     let id = id.filter(|i| !i.is_empty());
     if let Some(i) = &id {
-        if !terminal::available().iter().any(|t| &t.id == i) {
+        let installed = tauri::async_runtime::spawn_blocking(terminal::available)
+            .await
+            .map_err(|e| e.to_string())?;
+        if !installed.iter().any(|t| &t.id == i) {
             return Err(format!("{i} is not installed on this machine"));
         }
     }
@@ -880,7 +920,14 @@ pub async fn run_command(
             .clone()
     };
 
-    let out = ssh::exec(&handle, &command).await.map_err(anyhow_err)?;
+    let out = ssh::exec_limited(
+        &handle,
+        &command,
+        4 * 1024 * 1024,
+        Some(std::time::Duration::from_secs(120)),
+    )
+    .await
+    .map_err(anyhow_err)?;
     Ok(CommandResult {
         code: out.code,
         stdout: out.stdout,
@@ -924,8 +971,36 @@ pub async fn set_ssh_location(
     // choice — it simply contributes no connections. Refusing it here would
     // leave the previous location's hosts on screen under the new selection.
     let mut inner = state.inner.lock().await;
-    inner.settings.ssh_dir = dir.filter(|d| !d.is_empty());
+    let before = inner.ssh_dir();
+    let mut next = inner.settings.clone();
+    next.ssh_dir = dir.filter(|d| !d.is_empty());
+    let after = crate::state::ssh_dir_for(&next);
+
+    if after != before {
+        // Each location has its own ez_config. The connections in memory
+        // belong to the old one; carried across, the next save would write
+        // them over the new location's file and lose what it holds.
+        let open_owned = inner
+            .profiles
+            .iter()
+            .any(|p| !p.from_config && inner.sessions.contains_key(&p.id));
+        if open_owned {
+            return Err("disconnect your open connections before switching .ssh location".into());
+        }
+    }
+    inner.settings = next;
     store::save_settings(&inner.settings).map_err(err)?;
+    if after != before {
+        let open: Vec<Profile> = inner
+            .profiles
+            .iter()
+            .filter(|p| p.from_config && inner.sessions.contains_key(&p.id))
+            .cloned()
+            .collect();
+        let mut profiles = crate::ezconfig::load(&after);
+        profiles.extend(open);
+        inner.profiles = profiles;
+    }
     inner.sync_config_profiles();
     let active = inner.ssh_dir();
     drop(inner);
