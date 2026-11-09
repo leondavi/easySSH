@@ -205,17 +205,22 @@ end tell"#
     )
 }
 
+/// Write into the session that was just created, not `current window`: when
+/// iTerm is running with no windows open, `current window` is still unset
+/// straight after `create window`, the script fails, and the user gets
+/// Terminal.app instead of the iTerm they chose.
 #[cfg(target_os = "macos")]
 fn iterm_script(cmd: &str) -> String {
     format!(
         r#"tell application "iTerm"
     activate
+    set s to missing value
     try
-        tell current window to create tab with default profile
-    on error
-        create window with default profile
+        tell current window to set t to (create tab with default profile)
+        set s to current session of t
     end try
-    tell current session of current window to write text {cmd}
+    if s is missing value then set s to current session of (create window with default profile)
+    tell s to write text {cmd}
 end tell"#
     )
 }
