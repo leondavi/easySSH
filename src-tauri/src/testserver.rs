@@ -13,6 +13,10 @@ use tokio::net::TcpListener;
 
 pub const PASSWORD: &str = "correct-horse";
 
+/// A forward to this host is refused, as the server would refuse one to a
+/// target that is down.
+pub const REFUSED_HOST: &str = "refused.invalid";
+
 #[derive(Default)]
 pub struct Server {
     /// Keep the server-side channel alive; dropping it would close the
@@ -192,6 +196,12 @@ impl Handler for Server {
         reply: russh::server::ChannelOpenHandle,
         _session: &mut Session,
     ) -> Result<(), Self::Error> {
+        // Stands in for a target the server cannot reach, so a forward's
+        // handling of refusals can be driven.
+        if host_to_connect == REFUSED_HOST {
+            reply.reject(russh::ChannelOpenFailure::ConnectFailed).await;
+            return Ok(());
+        }
         reply.accept().await;
 
         let target = format!("{host_to_connect}:{port_to_connect}");

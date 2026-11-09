@@ -7,10 +7,11 @@
 
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::Arc;
+use std::time::{Duration, Instant};
 
-use anyhow::{anyhow, Context, Result};
+use anyhow::{anyhow, Result};
 use russh::client::Handle;
-use tokio::net::{TcpListener, TcpStream};
+use tokio::net::TcpListener;
 use tokio::task::JoinHandle;
 
 use crate::model::Tunnel;
@@ -86,6 +87,8 @@ pub async fn start_counting(
     let remote_port = spec.remote_port;
     let on_error = Arc::new(on_error);
 
+    let breaker = Arc::new(Breaker::default());
+
     let task = tokio::spawn(async move {
         loop {
             let (socket, peer) = match listener.accept().await {
@@ -103,37 +106,71 @@ pub async fn start_counting(
                     return;
                 }
             };
+
+            // While the target keeps refusing, close the client here rather
+            // than asking the server to try again: a page or script that
+            // retries the moment it fails would otherwise turn into a stream
+            // of channel opens over the SSH link, and of connection attempts
+            // from the server to the target.
+            if !breaker.admit(Instant::now()) {
+                drop(socket);
+                continue;
+            }
             counter.fetch_add(1, Ordering::Relaxed);
 
             let handle = handle.clone();
             let remote_host = remote_host.clone();
             let on_error = on_error.clone();
             let live = live.clone();
+            let breaker = breaker.clone();
             // One task per connection: a browser opens several at once and a
             // slow response on one must not block the others.
             tokio::spawn(async move {
                 let originator = peer.ip().to_string();
-                if let Err(e) = forward(
-                    handle,
-                    socket,
-                    &remote_host,
-                    remote_port,
-                    &originator,
-                    peer.port(),
-                )
-                .await
+                let channel = match handle
+                    .channel_open_direct_tcpip(
+                        remote_host.as_str(),
+                        remote_port as u32,
+                        originator.as_str(),
+                        peer.port() as u32,
+                    )
+                    .await
                 {
+                    Ok(channel) => {
+                        breaker.succeeded();
+                        channel
+                    }
+                    Err(e) => {
+                        log::debug!("opening a channel to {remote_host}:{remote_port}: {e:#}");
+                        let failed = breaker.failed(Instant::now());
+                        if !live.load(Ordering::Relaxed) {
+                            return;
+                        }
+                        let msg = e.to_string();
+                        let refused =
+                            msg.contains("Connection refused") || msg.contains("administratively");
+                        // One message per streak of failures, and one when
+                        // new connections are first held back — not one per
+                        // attempt, which would bury the user in toasts.
+                        match failed {
+                            Failed::First if refused => on_error(format!(
+                                "the remote refused {remote_host}:{remote_port} — is the service running there?"
+                            )),
+                            Failed::FirstPause(pause) => on_error(format!(
+                                "{remote_host}:{remote_port} keeps failing on the remote side — \
+                                 holding back new connections, retrying every {}s at most",
+                                pause.as_secs().max(1)
+                            )),
+                            _ => {}
+                        }
+                        return;
+                    }
+                };
+                let mut stream = channel.into_stream();
+                let mut socket = socket;
+                if let Err(e) = tokio::io::copy_bidirectional(&mut socket, &mut stream).await {
                     // A browser closing a keep-alive socket is normal, not worth surfacing.
                     log::debug!("forwarded connection ended: {e:#}");
-                    let msg = e.to_string();
-                    let still_ours = live.load(Ordering::Relaxed);
-                    if still_ours
-                        && (msg.contains("Connection refused") || msg.contains("administratively"))
-                    {
-                        on_error(format!(
-                            "the remote refused {remote_host}:{remote_port} — is the service running there?"
-                        ));
-                    }
                 }
             });
         }
@@ -146,27 +183,90 @@ pub async fn start_counting(
     })
 }
 
-async fn forward(
-    handle: Arc<Handle<Client>>,
-    mut socket: TcpStream,
-    remote_host: &str,
-    remote_port: u16,
-    originator_ip: &str,
-    originator_port: u16,
-) -> Result<()> {
-    let channel = handle
-        .channel_open_direct_tcpip(
-            remote_host,
-            remote_port as u32,
-            originator_ip,
-            originator_port as u32,
-        )
-        .await
-        .with_context(|| format!("opening a channel to {remote_host}:{remote_port}"))?;
+/// Consecutive channel-open failures before new connections are held back.
+/// A few are allowed through because a browser opens several at once, and
+/// one refused burst says little on its own.
+const TRIP_AFTER: u32 = 3;
+const FIRST_PAUSE: Duration = Duration::from_secs(1);
+const LONGEST_PAUSE: Duration = Duration::from_secs(30);
 
-    let mut stream = channel.into_stream();
-    tokio::io::copy_bidirectional(&mut socket, &mut stream).await?;
-    Ok(())
+/// A circuit breaker over a forward's channel opens.
+///
+/// Once the target has refused `TRIP_AFTER` times in a row, connections are
+/// closed locally for a pause that doubles each time the target is still
+/// failing, up to `LONGEST_PAUSE`. When a pause ends exactly one connection is
+/// let through to find out; its success closes the breaker again.
+#[derive(Default)]
+struct Breaker(std::sync::Mutex<BreakerState>);
+
+#[derive(Default)]
+struct BreakerState {
+    failures: u32,
+    /// Pauses in the current streak, which set the length of the next one.
+    pauses: u32,
+    paused_until: Option<Instant>,
+    /// A connection is out testing whether the target is back.
+    probing: bool,
+}
+
+#[derive(Debug, PartialEq)]
+enum Failed {
+    /// The first failure since the last success.
+    First,
+    /// The failure that first held new connections back, and for how long.
+    FirstPause(Duration),
+    Again,
+}
+
+impl Breaker {
+    fn state(&self) -> std::sync::MutexGuard<'_, BreakerState> {
+        // Nothing panics while holding it, but a poisoned breaker must not
+        // take the tunnel down with it.
+        self.0.lock().unwrap_or_else(|p| p.into_inner())
+    }
+
+    /// Whether a new connection may open a channel.
+    fn admit(&self, now: Instant) -> bool {
+        let mut s = self.state();
+        if s.failures < TRIP_AFTER {
+            return true;
+        }
+        if s.probing || s.paused_until.is_some_and(|until| now < until) {
+            return false;
+        }
+        s.probing = true;
+        true
+    }
+
+    fn succeeded(&self) {
+        *self.state() = BreakerState::default();
+    }
+
+    fn failed(&self, now: Instant) -> Failed {
+        let mut s = self.state();
+        s.failures += 1;
+        s.probing = false;
+        if s.failures < TRIP_AFTER {
+            return if s.failures == 1 {
+                Failed::First
+            } else {
+                Failed::Again
+            };
+        }
+        // Failures from connections admitted before the pause began land
+        // during it, and must not stretch it further.
+        if s.paused_until.is_some_and(|until| now < until) {
+            return Failed::Again;
+        }
+        let pause = (FIRST_PAUSE * 2u32.saturating_pow(s.pauses.min(8))).min(LONGEST_PAUSE);
+        s.pauses += 1;
+        s.paused_until = Some(now + pause);
+        if s.pauses == 1 {
+            Failed::FirstPause(pause)
+        } else {
+            Failed::Again
+        }
+    }
 }
 
 /// Accept errors that say nothing about the listener itself.
@@ -411,5 +511,88 @@ mod tests {
             tokio::time::sleep(std::time::Duration::from_millis(20)).await;
         }
         panic!("the local port was still bound after the tunnel stopped");
+    }
+
+    #[test]
+    fn the_breaker_lets_a_burst_through_then_pauses_and_probes() {
+        let b = Breaker::default();
+        let t0 = Instant::now();
+
+        for _ in 0..TRIP_AFTER {
+            assert!(b.admit(t0));
+        }
+        assert_eq!(b.failed(t0), Failed::First);
+        assert_eq!(b.failed(t0), Failed::Again);
+        assert_eq!(b.failed(t0), Failed::FirstPause(FIRST_PAUSE));
+
+        // Held back for the pause, and a straggler from before it does not
+        // stretch it.
+        assert!(!b.admit(t0));
+        assert_eq!(b.failed(t0), Failed::Again);
+        assert!(!b.admit(t0 + FIRST_PAUSE / 2));
+
+        // Then exactly one probe.
+        let t1 = t0 + FIRST_PAUSE;
+        assert!(b.admit(t1));
+        assert!(!b.admit(t1), "only one connection probes at a time");
+
+        // Failing again doubles the pause.
+        b.failed(t1);
+        assert!(!b.admit(t1 + FIRST_PAUSE));
+        assert!(b.admit(t1 + FIRST_PAUSE * 2));
+
+        // A success closes it entirely.
+        b.succeeded();
+        assert!(b.admit(t1) && b.admit(t1) && b.admit(t1));
+    }
+
+    #[test]
+    fn the_breaker_pause_is_capped() {
+        let b = Breaker::default();
+        let mut now = Instant::now();
+        for _ in 0..40 {
+            b.failed(now);
+            now += LONGEST_PAUSE;
+        }
+        b.failed(now);
+        assert!(!b.admit(now + LONGEST_PAUSE - Duration::from_millis(1)));
+        assert!(b.admit(now + LONGEST_PAUSE));
+    }
+
+    /// The failure that prompted the breaker: a client retrying against a
+    /// target that is down must not turn into a channel open per attempt.
+    #[tokio::test]
+    async fn a_refusing_target_is_not_hammered() {
+        let handle = connect_test_server("tunnel-refused").await;
+        let local = free_port().await;
+        let errors = Arc::new(std::sync::Mutex::new(Vec::<String>::new()));
+        let seen = errors.clone();
+
+        let running = start(handle, spec(local, harness::REFUSED_HOST, 80), move |e| {
+            seen.lock().unwrap().push(e)
+        })
+        .await
+        .expect("bind");
+
+        // A client reconnecting the moment it is dropped, for half a second.
+        let deadline = Instant::now() + Duration::from_millis(500);
+        let mut attempts = 0;
+        while Instant::now() < deadline {
+            if let Ok(mut c) = tokio::net::TcpStream::connect(("127.0.0.1", local)).await {
+                let mut buf = [0u8; 16];
+                let _ = c.read(&mut buf).await;
+            }
+            attempts += 1;
+        }
+
+        let opened = running.connections.load(Ordering::Relaxed);
+        assert!(attempts > 20, "the client barely ran: {attempts}");
+        assert!(
+            opened <= TRIP_AFTER as u64 + 1,
+            "{opened} channel opens for {attempts} attempts — the breaker did not hold"
+        );
+        let errors = errors.lock().unwrap().clone();
+        assert!(errors.len() <= 2, "one toast per attempt: {errors:?}");
+        running.stop();
     }
 }
