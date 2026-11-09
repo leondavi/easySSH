@@ -1,0 +1,80 @@
+Package: easy-ssh
+Architecture: amd64
+Version: 1.6.2
+Priority: optional
+Maintainer: easySSH contributors
+Installed-Size: 9090
+Depends: libwebkit2gtk-4.1-0, libgtk-3-0
+Filename: pool/main/easySSH_1.6.2_amd64.deb
+Size: 3969156
+MD5sum: d656c6d3c7dc96bfce82edabe2be9e55
+SHA1: b03d2b76e3406e2e750880dc80b4cb992c9aface
+SHA256: b87c137e476d851e951e56298dc24a83d79ec02eb6198cfaa9bf5b7ef182741e
+SHA512: 02aa0400d74e12f6acd751b1d73e92d1d616a7f679b8ef9f51fe9496b51dba6377384e1b3de495d5b7458a080b62ba91d00e3a63851833f6ea7d1a4f69ef6a18
+Description: Effortless SSH connections and remote web tunnels
+ easySSH connects to remote servers with a password, installs your public key for passwordless logins from then on, opens a real terminal already connected, and forwards remote web services to your browser.
+
+Package: easy-ssh
+Architecture: amd64
+Version: 1.6.3
+Priority: optional
+Maintainer: easySSH contributors
+Installed-Size: 9091
+Depends: libwebkit2gtk-4.1-0, libgtk-3-0
+Filename: pool/main/easySSH_1.6.3_amd64.deb
+Size: 3970034
+MD5sum: 66a7b0f25254136f0c2179b7e46f7308
+SHA1: b9b47a5154a4fb50aaf43f8d1d146e7ec2b62c16
+SHA256: 8d3f22da78aca8fbbde01dda1c53cb42d04c56acf192de2e0cad99f9e159549e
+SHA512: 677419b5911ab9630f610a2a1af96473d3591660ca38fae5db00777626d0c34d723d97264a3708de8a4f35f8f23751e86f20ecd5269343c1d9bb2d15e31295d1
+Description: Effortless SSH connections and remote web tunnels
+ easySSH connects to remote servers with a password, installs your public key for passwordless logins from then on, opens a real terminal already connected, and forwards remote web services to your browser.
+
+Package: easy-ssh
+Architecture: amd64
+Version: 1.6.4
+Priority: optional
+Maintainer: easySSH contributors
+Installed-Size: 9136
+Depends: libwebkit2gtk-4.1-0, libgtk-3-0
+Filename: pool/main/easySSH_1.6.4_amd64.deb
+Size: 3991090
+MD5sum: a0f84acbc19697a176abda7afdb25d7c
+SHA1: 5e83c409ce844ea02a22c1e37c7bddb4845deca0
+SHA256: ef757161246f3c067db74e6b205bcbe7949fe3f56e113e900e3084d1789c1ff1
+SHA512: 9dd904ce68c5aa148108535fd62e9044191e30bae6f2cafdede7a011045a01fd6e029aa8501138d26b74210188a843158cd37b2bccabdd8b2b8976b99127e38d
+Description: Effortless SSH connections and remote web tunnels
+ easySSH connects to remote servers with a password, installs your public key for passwordless logins from then on, opens a real terminal already connected, and forwards remote web services to your browser.
+
+Package: easy-ssh
+Architecture: amd64
+Version: 1.6.5
+Priority: optional
+Maintainer: easySSH contributors
+Installed-Size: 9136
+Depends: libwebkit2gtk-4.1-0, libgtk-3-0
+Filename: pool/main/easySSH_1.6.5_amd64.deb
+Size: 3991368
+MD5sum: 1e1ba268e671197148160901082bba77
+SHA1: 981a64d8c7af3c13dfedce2a4a90245a48216514
+SHA256: 711e7f7bb1b374916460eeba87c655a8d42ef87a746583cb6ea7318c68e67f33
+SHA512: 19538afad728c5e0660ed693f6fc28a2d94c85321ae139b5ad26ea85d1a85ec1ea864606b167b92b4c5283238bb04466d94eaa16c57ce1159df407df9e5b6377
+Description: Effortless SSH connections and remote web tunnels
+ easySSH connects to remote servers with a password, installs your public key for passwordless logins from then on, opens a real terminal already connected, and forwards remote web services to your browser.
+
+Package: easy-ssh
+Architecture: amd64
+Version: 1.6.6
+Priority: optional
+Maintainer: easySSH contributors
+Installed-Size: 9134
+Depends: libwebkit2gtk-4.1-0, libgtk-3-0
+Filename: pool/main/easySSH_1.6.6_amd64.deb
+Size: 3991854
+MD5sum: 14aad05dad799f45cfbc12cd59790302
+SHA1: 42895958eb11f021a3baa103baa22f9c008871ca
+SHA256: c0e9bb5992e11168d8a065ca73b613be404bb2619d317eff5a6a71cfdd4375db
+SHA512: ee51a29573023d6fa6e73675854ecfe9f678fd1946180520fd5496d4e81c010936dbdd1dc4d6370407c284acb0657a84b994387c0f7aeee80d89b97ed7cb8b86
+Description: Effortless SSH connections and remote web tunnels
+ easySSH connects to remote servers with a password, installs your public key for passwordless logins from then on, opens a real terminal already connected, and forwards remote web services to your browser.
+
